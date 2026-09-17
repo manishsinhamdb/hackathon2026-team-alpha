@@ -1,0 +1,612 @@
+<!doctype html>
+<title>Atlas App Skill</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+  :root {
+    --forest: #00684A;
+    --spring: #00ED64;
+    --evergreen: #023430;
+    --border: #E3F7EE;
+    --surface: #F5FBF7;
+    --muted: #4A8870;
+    --bg: #ffffff;
+    --ink: #0B2620;
+    --ink-soft: #3C6A5B;
+    --code-bg: #04211B;
+    --code-ink: #CFEEE1;
+    --code-key: #7FE8B8;
+    --radius: 10px;
+    --font-body: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #06110E;
+      --surface: #0B1F19;
+      --border: #143C30;
+      --ink: #E7F6EF;
+      --ink-soft: #9FC9BA;
+      --muted: #6FB79C;
+      --forest: #12A374;
+      --spring: #26F17E;
+      --evergreen: #A8F0D2;
+      --code-bg: #03130F;
+      --code-ink: #CFEEE1;
+      --code-key: #6FE8B0;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #06110E;
+    --surface: #0B1F19;
+    --border: #143C30;
+    --ink: #E7F6EF;
+    --ink-soft: #9FC9BA;
+    --muted: #6FB79C;
+    --forest: #12A374;
+    --spring: #26F17E;
+    --evergreen: #A8F0D2;
+    --code-bg: #03130F;
+    --code-ink: #CFEEE1;
+    --code-key: #6FE8B0;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.6;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 48px 32px 96px;
+  }
+
+  /* ---------- Header ---------- */
+  header.hero {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 40px;
+  }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--spring);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--spring) 20%, transparent);
+    display: inline-block;
+  }
+  h1 {
+    font-size: clamp(32px, 4.4vw, 46px);
+    margin: 0;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    color: var(--ink);
+  }
+  .dek {
+    max-width: 62ch;
+    color: var(--ink-soft);
+    font-size: 16.5px;
+    margin: 0;
+  }
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .chip {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--forest);
+  }
+
+  /* ---------- Layout: rail + content ---------- */
+  .layout {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 48px;
+    align-items: start;
+  }
+  nav.toc {
+    position: sticky;
+    top: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 13.5px;
+  }
+  nav.toc .toc-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  nav.toc a {
+    color: var(--ink-soft);
+    text-decoration: none;
+    padding: 6px 0 6px 12px;
+    border-left: 2px solid var(--border);
+    transition: color .15s, border-color .15s;
+  }
+  nav.toc a:hover, nav.toc a:focus-visible {
+    color: var(--forest);
+    border-left-color: var(--spring);
+    outline: none;
+  }
+
+  main { min-width: 0; }
+  section { margin-bottom: 52px; scroll-margin-top: 24px; }
+  section h2 {
+    font-size: 22px;
+    margin: 0 0 14px;
+    color: var(--ink);
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  section h2 .num {
+    font-family: var(--font-mono);
+    font-size: 14px;
+    color: var(--spring);
+    background: var(--evergreen);
+    padding: 2px 8px;
+    border-radius: 6px;
+  }
+  section p { color: var(--ink-soft); max-width: 72ch; }
+  section > p:first-of-type { margin-top: 0; }
+
+  /* ---------- Cards ---------- */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 22px;
+  }
+  .card + .card { margin-top: 14px; }
+  .card h3 {
+    margin: 0 0 8px;
+    font-size: 15.5px;
+    color: var(--forest);
+  }
+  .card p { margin: 0; font-size: 14.5px; }
+
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 760px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static; flex-direction: row; flex-wrap: wrap; }
+    .grid-2 { grid-template-columns: 1fr; }
+  }
+
+  /* ---------- Code blocks ---------- */
+  pre {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    overflow-x: auto;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 10px 0 0;
+    border: 1px solid color-mix(in srgb, var(--spring) 18%, transparent);
+  }
+  code { font-family: var(--font-mono); }
+  :not(pre) > code {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--forest);
+    padding: 1px 6px;
+    border-radius: 5px;
+    font-size: 0.92em;
+  }
+  .fname {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--code-key);
+    margin-bottom: -4px;
+    display: block;
+  }
+
+  /* ---------- Feature gate table ---------- */
+  table.gates {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+  table.gates th, table.gates td {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.gates th {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    font-weight: 500;
+  }
+  table.gates td:first-child { font-family: var(--font-mono); color: var(--forest); white-space: nowrap; }
+  .yes { color: var(--forest); font-weight: 600; }
+  .no  { color: var(--ink-soft); }
+
+  /* ---------- Palette swatches ---------- */
+  .swatches {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .swatch {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    width: 88px;
+  }
+  .swatch .chip-color {
+    width: 88px; height: 56px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+
+  /* ---------- Warning / mistake list ---------- */
+  ul.mistakes { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
+  ul.mistakes li {
+    display: flex;
+    gap: 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid #E05A47;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    padding: 12px 16px;
+    font-size: 14px;
+  }
+  ul.mistakes li strong { color: var(--ink); }
+  ul.mistakes li span { color: var(--ink-soft); }
+
+  /* ---------- Two-track diagram ---------- */
+  .tracks {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  .track {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 22px;
+    background: linear-gradient(180deg, var(--surface), transparent 140%);
+  }
+  .track h3 {
+    margin: 0 0 4px;
+    font-size: 16.5px;
+    color: var(--ink);
+  }
+  .track .tag {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--forest);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .track ol {
+    margin: 14px 0 0;
+    padding-left: 18px;
+    font-size: 14px;
+    color: var(--ink-soft);
+  }
+  .track ol li { margin-bottom: 6px; }
+  @media (max-width: 760px) { .tracks { grid-template-columns: 1fr; } }
+
+  footer {
+    margin-top: 60px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--muted);
+    font-family: var(--font-mono);
+  }
+
+  a.rel {
+    color: var(--forest);
+    text-decoration: none;
+    border-bottom: 1px dashed var(--forest);
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="eyebrow">Claude Code Skill · Agent Definition</div>
+    <h1>atlas-pov-app</h1>
+    <p class="dek">The build playbook for the demo application layer of a MongoDB Atlas proof-of-value: a Next.js prototype wired to Atlas Search, Vector Search, <code>$rankFusion</code> hybrid search, and a RAG chatbot — or, on the alternate track, a Queryable Encryption / CSFLE PII-protection app. Invoked mid-way through an <span class="chip" style="padding:0 4px;border:none;background:none;color:var(--forest);font-family:var(--font-mono)">atlas-pov-prototype</span> engagement, once seed data already exists.</p>
+    <div class="meta-row">
+      <span class="chip">agent · full tool access</span>
+      <span class="chip">reads engagement.config.js</span>
+      <span class="chip">Next.js · TypeScript</span>
+      <span class="chip">2 tracks: search/RAG · encryption</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="toc">
+      <div class="toc-label">On this page</div>
+      <a href="#overview">Overview</a>
+      <a href="#config">Step 1 — Config</a>
+      <a href="#scaffold">Step 2 — Scaffold</a>
+      <a href="#lib">Step 3 — Core libraries</a>
+      <a href="#routes">Step 4 — API routes</a>
+      <a href="#ui">Step 5 — UI components</a>
+      <a href="#validate">Step 6 — Validation</a>
+      <a href="#encryption">Alternate track</a>
+      <a href="#mistakes">Common mistakes</a>
+      <a href="#related">Related skills</a>
+    </nav>
+
+    <main>
+
+      <section id="overview">
+        <h2>What this skill is</h2>
+        <p>
+          <code>atlas-pov-app</code> is one of five cooperating skills that make up an Atlas
+          proof-of-value build. Where <code>atlas-pov-seed</code> plants the data and
+          <code>atlas-pov-narrative</code> tells the story, this skill owns the thing the
+          customer actually clicks through: the Next.js app itself. It encodes a set of
+          hard-won, non-obvious decisions — a Voyage embedding call that silently breaks
+          without one flag, a keyword-search leg that returns nothing if you reuse the wrong
+          query string, an LLM response shape that hides the real answer behind a reasoning
+          step — so that every engagement doesn't relearn them from scratch.
+        </p>
+        <div class="card">
+          <h3>Before it writes a line of code</h3>
+          <p>
+            It reads <code>engagement.config.js</code> for the tenant field, primary
+            collection, search/embedding paths, index names, and LLM gateway settings — then
+            checks <code>engagementType</code> to decide which of the two tracks below applies.
+          </p>
+        </div>
+      </section>
+
+      <section id="config">
+        <h2><span class="num">01</span>Read engagement config</h2>
+        <p>Every downstream decision is driven by config, never hardcoded. The skill pulls:</p>
+        <div class="grid-2">
+          <div class="card">
+            <h3>Tenancy &amp; data shape</h3>
+            <p><code>TENANT_FIELD</code>, <code>DEFAULT_TENANT</code>, <code>PRIMARY_COLLECTION</code> — e.g. <code>hospital</code> / <code>hospital_01</code> / <code>patients</code>.</p>
+          </div>
+          <div class="card">
+            <h3>Search &amp; vector wiring</h3>
+            <p><code>SEARCH_PATHS</code>, <code>EMBEDDING_PATH</code>, <code>SEARCH_INDEX_NAME</code>, <code>VECTOR_INDEX_NAME</code>.</p>
+          </div>
+          <div class="card">
+            <h3>LLM gateway</h3>
+            <p><code>LLM_GATEWAY_URL</code>, <code>LLM_GATEWAY_KEY_ENV</code>, <code>LLM_MODEL</code>.</p>
+          </div>
+          <div class="card">
+            <h3>Feature gate</h3>
+            <p><code>headlineFeatures</code> — build only what's listed. See the gate table below.</p>
+          </div>
+        </div>
+
+        <p style="margin-top:22px">
+          <strong style="color:var(--ink)">Feature flags decide what gets built at all</strong> —
+          this is the single most important gate in the skill. Nothing in
+          <code>headlineFeatures</code> means nothing gets scaffolded for it, including files
+          that would otherwise seem harmless to include "just in case."
+        </p>
+        <table class="gates">
+          <thead>
+            <tr><th>headlineFeatures value</th><th>Unlocks</th><th>Skipped entirely if absent</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>search</td><td>Atlas Search text query + highlighting</td><td><code>/api/search</code> route</td></tr>
+            <tr><td>analytics</td><td>Parallel aggregation dashboards</td><td><code>/api/analytics</code> route</td></tr>
+            <tr><td>rankFusion</td><td><code>$rankFusion</code> hybrid search, self-query LLM step</td><td><code>selfQuery.ts</code>, <code>WeightSlider</code>, <code>CompareView</code>, hybrid page</td></tr>
+            <tr><td>chat</td><td>RAG chatbot over vector retrieval</td><td><code>/api/chat</code> route, chat page</td></tr>
+          </tbody>
+        </table>
+
+        <p style="margin-top:22px">The MongoDB brand palette is fixed unless the engagement overrides it:</p>
+        <div class="swatches">
+          <div class="swatch"><div class="chip-color" style="background:#00684A"></div>forest<br>#00684A</div>
+          <div class="swatch"><div class="chip-color" style="background:#00ED64"></div>spring<br>#00ED64</div>
+          <div class="swatch"><div class="chip-color" style="background:#023430"></div>evergreen<br>#023430</div>
+          <div class="swatch"><div class="chip-color" style="background:#E3F7EE"></div>border<br>#E3F7EE</div>
+          <div class="swatch"><div class="chip-color" style="background:#F5FBF7"></div>surface<br>#F5FBF7</div>
+          <div class="swatch"><div class="chip-color" style="background:#4A8870"></div>muted<br>#4A8870</div>
+        </div>
+      </section>
+
+      <section id="scaffold">
+        <h2><span class="num">02</span>Scaffold the app</h2>
+        <p>A standard Next.js app-router scaffold, then a fixed directory shape so every engagement's codebase reads the same way to the next person who opens it.</p>
+        <span class="fname">terminal</span>
+        <pre>npx create-next-app@latest app --typescript --app --no-tailwind --src-dir --no-eslint --no-git --import-alias "@/*"
+cd app && npm install mongodb</pre>
+        <span class="fname">directory shape</span>
+        <pre>src/lib/          db.ts, voyage.ts, selfQuery.ts
+src/components/   Nav.tsx, QueryPanel.tsx, LimitSlider.tsx, WeightSlider.tsx, CompareView.tsx
+src/app/api/      search/, analytics/, vector-search/, chat/
+src/app/          page.tsx, search/, analytics/, [feature]/, chat/</pre>
+      </section>
+
+      <section id="lib">
+        <h2><span class="num">03</span>Core library files</h2>
+
+        <h3 style="color:var(--forest);font-size:16px">db.ts — ping-based reconnect</h3>
+        <p>A cached client that pings before reuse. Skip the ping and a server restart costs every subsequent request a 30-second hang before it notices the connection is dead.</p>
+        <pre>export async function getDb(): Promise&lt;Db&gt; {
+  if (db) {
+    try { await db.command({ ping: 1 }); return db; }
+    catch { client = null; db = null; }
+  }
+  client = new MongoClient(uri);
+  await client.connect();
+  db = client.db(dbName);
+  return db;
+}</pre>
+
+        <h3 style="color:var(--forest);font-size:16px;margin-top:26px">voyage.ts — the dimension flag that must not be dropped</h3>
+        <p><code>output_dimension: 1024</code> is not optional. Omit it and query vectors come back at a different width than the ones already stored, and <code>$vectorSearch</code> fails on a dimension mismatch — one of the more confusing failure modes to debug cold.</p>
+        <pre>body: JSON.stringify({ input: [text], model: 'voyage-4-large', output_dimension: 1024 })</pre>
+
+        <h3 style="color:var(--forest);font-size:16px;margin-top:26px">selfQuery.ts — LLM query decomposition</h3>
+        <p>Built <em>only</em> when <code>rankFusion</code> is in <code>headlineFeatures</code>. This is the most architecturally significant file in the whole skill: it calls the LLM before embedding, splitting free text into a clean <code>semanticQuery</code> (entity names stripped, safe to embed), typed hard <code>filters</code>, and a one-line <code>explanation</code>.</p>
+        <div class="card">
+          <h3>Three rules the system prompt must enforce</h3>
+          <p>1. Named entities (drugs, SKUs) are stripped from the embedded text — they belong in the keyword leg, not the vector.<br>
+          2. Numeric measurements are hard filters, not identity fields the LLM might fold into something like age.<br>
+          3. The literal word "json" appears in the LLM input whenever <code>json_object</code> format mode is used.</p>
+        </div>
+        <p style="margin-top:16px">Entity spelling variants (e.g. "BRAF V600E" vs. "BRAF mutated") are normalized via a <code>domainMap</code> read from config — never hardcoded — so free-form LLM output still matches what's actually stored for an <code>$in</code> filter.</p>
+      </section>
+
+      <section id="routes">
+        <h2><span class="num">04</span>API routes</h2>
+        <p>Every route is wrapped in try/catch — without it, Next.js returns an empty 500 body and the client sees a bare <code>Unexpected end of JSON input</code> instead of a real error. Only the routes matching <code>headlineFeatures</code> get built.</p>
+
+        <div class="card">
+          <h3>/api/vector-search — the centerpiece</h3>
+          <p>Runs the self-query LLM step, embeds the cleaned semantic query, then fuses two <code>$rankFusion</code> legs. The rule that matters most here: the keyword leg searches the <em>raw</em> input text (drug names intact), never the stripped <code>semanticQuery</code> — otherwise the two legs stop disagreeing and the compare view has nothing to show.</p>
+        </div>
+        <pre>$rankFusion: {
+  input: { pipelines: {
+    vector:  [{ $vectorSearch: { index, path: EMBEDDING_PATH, queryVector: semanticVector, ... } }],
+    keyword: [{ $search: { index, compound: { should: terms.map(t => ({ text: { query: t, path, synonyms: 'domain_synonyms' } })), minimumShouldMatch: 1 } }}],
+  }},
+  combination: { weights: { vector: vw, keyword: kw } },
+}</pre>
+        <p style="margin-top:10px">Keyword terms use <code>compound.should</code>, not a single multi-word <code>text</code> query — Atlas Search's <code>text</code> operator ANDs terms by default and returns nothing once they span different fields.</p>
+
+        <div class="grid-2" style="margin-top:20px">
+          <div class="card"><h3>/api/search</h3><p>Atlas Search text query with synonym-aware highlighting, built only if <code>search</code> is listed.</p></div>
+          <div class="card"><h3>/api/analytics</h3><p><code>Promise.all</code> across several aggregation pipelines, built only if <code>analytics</code> is listed.</p></div>
+        </div>
+        <div class="card" style="margin-top:14px">
+          <h3>/api/chat — RAG</h3>
+          <p>Embed the question → <code>$vectorSearch</code> retrieval → build a context string from the enriched fields (not just summary text) → call the LLM gateway. Gateway response parsing needs its own care: the first item in a Grove/OpenAI Responses API <code>output</code> array is often a reasoning step with empty content, so the answer is found with <code>output.findLast(o =&gt; o.type==='message' &amp;&amp; o.content?.length &gt; 0)</code>.</p>
+        </div>
+      </section>
+
+      <section id="ui">
+        <h2><span class="num">05</span>UI components</h2>
+        <p>A fixed component vocabulary, styled entirely in the green brand palette — never black or generic gray text.</p>
+        <div class="grid-2">
+          <div class="card"><h3>QueryPanel</h3><p>Shows the executed MongoDB pipeline on every search/vector page, with the raw embedding array swapped for a placeholder before display.</p></div>
+          <div class="card"><h3>LimitSlider</h3><p>Label stacked above the track so it fills sidebar width; max 100 for RAG, 50 for plain search.</p></div>
+          <div class="card"><h3>WeightSlider</h3><p><em>rankFusion only.</em> One bar, keyword left / vector right, live percentage pills on both ends.</p></div>
+          <div class="card"><h3>CompareView</h3><p><em>rankFusion only.</em> Three columns — vector-only, keyword-only, hybrid — with presence badges. The single most effective demo surface in the app.</p></div>
+        </div>
+        <p style="margin-top:18px">Every hybrid-search page ships three pre-verified demo presets: a query where keyword wins, one where vector wins, and one where only the hybrid combination captures both — each auto-configuring the weight slider and enabling compare mode on click.</p>
+      </section>
+
+      <section id="validate">
+        <h2><span class="num">06</span>Fast validation endpoint</h2>
+        <p>Any page with pre-loaded examples gets a lightweight GET route that checks each example actually returns results before showing it — so a demo never opens on a preset query that silently returns zero rows.</p>
+        <pre>GET /api/.../validate?text=...
+→ embeds text, runs a 1-result $vectorSearch, returns { hasResults: boolean }</pre>
+      </section>
+
+      <section id="encryption">
+        <h2>Alternate track — Queryable Encryption / CSFLE</h2>
+        <p>When <code>engagement.config.js</code> sets <code>engagementType: 'encryption'</code>, Steps 1–6 above are skipped entirely — there is no <code>headlineFeatures</code> fork on this track, and no Search/Vector/<code>$rankFusion</code>/chat/LLM code exists at all.</p>
+
+        <div class="tracks">
+          <div class="track">
+            <div class="tag">Default track</div>
+            <h3>Search · Vector · Hybrid · RAG</h3>
+            <ol>
+              <li>Feature-gated by <code>headlineFeatures</code></li>
+              <li>Voyage embeddings + LLM gateway</li>
+              <li>Self-query decomposition for hybrid search</li>
+              <li>Compare view is the demo centerpiece</li>
+            </ol>
+          </div>
+          <div class="track">
+            <div class="tag">Encryption track</div>
+            <h3>Queryable Encryption / CSFLE</h3>
+            <ol>
+              <li>Fixed feature set — no gating</li>
+              <li>Two lazily-initialized MongoClients: encrypted &amp; raw</li>
+              <li>Consumes key maps the seed workstream already built — never re-derives them</li>
+              <li><code>/admin</code> side-by-side view is the demo centerpiece</li>
+            </ol>
+          </div>
+        </div>
+
+        <p style="margin-top:22px"><strong style="color:var(--ink)">Two client singletons</strong>, never hand-rolled:</p>
+        <div class="grid-2">
+          <div class="card"><h3>getEncryptedClient(mode)</h3><p><code>autoEncryption</code> with the field/schema map built from the shared <code>buildFieldMaps.js</code> and the seed workstream's <code>.keyids.json</code> — same data keys the stored ciphertext actually used.</p></div>
+          <div class="card"><h3>getRawClient()</h3><p>A plain client with <em>no</em> auto-encryption — the simulated DB-admin view. Used only to prove it structurally cannot decrypt anything.</p></div>
+        </div>
+
+        <p style="margin-top:18px">Three API routes plus one deliberate rejection: <code>POST /api/customers</code> (transparent encrypt), <code>GET /api/customers</code> (decrypted list), <code>GET /api/customers/lookup</code> (equality query on a field validated against <code>piiFields</code> — anything else is a 400, which is itself a demo point), and <code>GET /api/admin/raw</code>, which renders ciphertext explicitly as <code>{ kind: 'ciphertext', bsonSubtype: 6, ... }</code> so it can never be mistaken for a plain string.</p>
+
+        <div class="card" style="margin-top:16px;border-left:3px solid var(--forest)">
+          <h3>Gotcha: .env.local doesn't inherit</h3>
+          <p>A Next.js app scaffolded into its own subdirectory does not auto-load a repo-root <code>.env.local</code>. The encryption bootstrap module resolves and parses the shared root file explicitly, rather than letting a second, divergent copy get created inside the app.</p>
+        </div>
+      </section>
+
+      <section id="mistakes">
+        <h2>Common mistakes this skill exists to prevent</h2>
+        <ul class="mistakes">
+          <li><strong>No try/catch on a route</strong><span> → empty 500 body, client crashes with <code>Unexpected end of JSON input</code>.</span></li>
+          <li><strong>Singleton DB client without a ping check</strong><span> → 30-second timeout on the first request after any server restart.</span></li>
+          <li><strong>Multi-word <code>text</code> query in the keyword leg</strong><span> → Atlas Search ANDs terms by default; use <code>compound.should</code> with <code>minimumShouldMatch: 1</code> instead.</span></li>
+          <li><strong>semanticQuery reused in the keyword leg</strong><span> → drug names already stripped, keyword leg returns nothing, compare mode shows no divergence.</span></li>
+          <li><strong>Grove/OpenAI response parsed naively</strong><span> → <code>output[0]</code> is a reasoning step with empty content; use <code>findLast</code> to find the real message.</span></li>
+          <li><strong>Missing <code>output_dimension: 1024</code></strong><span> → query vectors come back 2048-dim against 1024-dim stored vectors; <code>$vectorSearch</code> errors on mismatch.</span></li>
+        </ul>
+      </section>
+
+      <section id="related">
+        <h2>Where this fits among the other Atlas POV skills</h2>
+        <p>
+          <span class="rel">atlas-pov-discovery</span> drafts the eight discovery answers from a call
+          transcript → <span class="rel">atlas-pov-prototype</span> turns those into
+          <code>engagement.config.js</code> and orchestrates the build →
+          <span class="rel">atlas-pov-seed</span> generates domain data, embeddings and index
+          definitions → <strong style="color:var(--forest)">atlas-pov-app</strong> builds the
+          Next.js app documented here → <span class="rel">atlas-pov-narrative</span> produces
+          the architecture animation and stakeholder deck once the app exists.
+        </p>
+      </section>
+
+    </main>
+  </div>
+
+  <footer>atlas-pov-app · agent definition · full tool access · reads engagement.config.js</footer>
+</div>
