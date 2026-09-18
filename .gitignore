@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.agentic/
+__pycache__/
+*.py[cod]
+logs/
+node_modules/
+dist/
+.venv/
+.DS_Store

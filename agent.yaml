@@ -1,0 +1,27 @@
+# Monorepo root file.
+# The CLI treats this repository as a monorepo because this file has an `agents`
+# key instead of an `entrypoint` key. Every agent that should take part in the
+# shared local stack must be listed here, with the path to its workspace.
+#
+# Adding a folder under agents/ does nothing on its own: add the entry below in
+# the same pull request. scripts/check_agents_map.py enforces this in CI.
+#
+# Uncomment your row when your workspace exists.
+
+agents:
+  # - name: chat-agent
+  #   path: agents/chat-agent
+  # - name: draft-agent
+  #   path: agents/draft-agent
+  # - name: coding-orchestrator
+  #   path: agents/coding-orchestrator
+  # - name: data-seeding-agent
+  #   path: agents/data-seeding-agent
+  # - name: api-agent
+  #   path: agents/api-agent
+  # - name: frontend-agent
+  #   path: agents/frontend-agent
+  # - name: deploy-agent
+  #   path: agents/deploy-agent
+  # - name: test-agent
+  #   path: agents/test-agent

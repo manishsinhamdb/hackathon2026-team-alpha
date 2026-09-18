@@ -1,0 +1,8 @@
+# Shared project configuration for the local development stack.
+# Memory is a project-level feature: the settings here apply to every agent
+# whose own agent.yaml enables memory.
+memory:
+  extraction:
+    # Background extraction needs its own LLM key. Leave the list empty until
+    # the team has one; storage and search work without it.
+    enabled: []
