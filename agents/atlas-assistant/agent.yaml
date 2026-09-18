@@ -26,8 +26,10 @@ network:
     egress_mode: allow_all
 a2a:
     enabled: true
-    allowed_callers:
-        - 56520d03bb9d72e95d36d977
+    # Workspace IDs, filled in after `agentic init` registers the agents in
+    # the team platform project. An empty list allows any agent in the
+    # project; see docs/agent-communication.md.
+    allowed_callers: []
     skills:
         - name: atlas-operations
           description: Inspect and operate MongoDB Atlas clusters in one project - list clusters, health metrics, pause or resume and scale (with human approval), and temporary IP access list entries.
