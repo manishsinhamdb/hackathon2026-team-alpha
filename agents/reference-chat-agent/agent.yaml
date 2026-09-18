@@ -1,0 +1,40 @@
+# Human-readable app slug used by Agentic Platform tooling.
+# `agentic create` should rewrite this when generating a new app from the template.
+name: chat-agent
+# Python import path to the Magenta SDK App instance.
+# Format: <module path>:<variable name>. This template exposes `app` from
+# src/agent_chat_agent/main.py.
+entrypoint: agent_chat_agent.main:app
+framework: langgraph
+# Runtime feature flags controlled by agent.yaml, not .env. Both are listed
+# explicitly: a key that is present here wins over any ENABLE_* environment
+# variable, so declaring both keeps ambient environment state from switching a
+# feature on behind your back.
+# Set memory to true to enable long-term profile memory; VOYAGE_API_KEY must be
+# present in .env when memory is enabled. Guardrails additionally need a
+# reachable guardrails service.
+features:
+    durable_workflow: true
+    guardrails: false
+    memory: true
+# Tool placement and pass-through secrets. Interrupt tools must stay on the agent.
+sandboxes:
+    agent:
+        secrets: ["*"]
+        tools: []
+    tool:
+        secrets: ["*"]
+        tools:
+            - get_current_date
+            - save_user_info
+            - recall_user_info
+version: 0.1.0
+network:
+    egress_mode: allow_all
+a2a:
+    enabled: true
+    skills:
+        - name: chat
+          description: Conversational front desk that remembers the user and delegates specialist work to other agents.
+    input_modes: ["text/plain"]
+    output_modes: ["text/plain"]

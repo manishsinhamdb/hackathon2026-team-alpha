@@ -25,3 +25,7 @@ agents:
   #   path: agents/deploy-agent
   # - name: test-agent
   #   path: agents/test-agent
+  - name: reference-chat-agent
+    path: agents/reference-chat-agent
+  - name: atlas-assistant
+    path: agents/atlas-assistant

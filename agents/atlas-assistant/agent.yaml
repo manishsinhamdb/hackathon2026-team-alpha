@@ -1,0 +1,36 @@
+# Human-readable app slug used by Agentic Platform tooling.
+name: atlas-assistant
+# Python import path to the Magenta SDK App instance (<module path>:<variable>).
+entrypoint: agent_atlas_assistant.main:app
+framework: langgraph
+features:
+    durable_workflow: true
+    guardrails: false
+    memory: false
+# Tool placement and pass-through secrets. Interrupt tools must stay on the agent.
+sandboxes:
+    agent:
+        secrets: ["*"]
+        tools:
+            - human_review
+    tool:
+        secrets: ["*"]
+        tools:
+            - list_clusters
+            - get_cluster_metrics
+            - add_ip_access
+            - pause_resume_cluster
+            - scale_cluster
+version: 0.1.0
+network:
+    egress_mode: allow_all
+a2a:
+    enabled: true
+    allowed_callers:
+        - 56520d03bb9d72e95d36d977
+    skills:
+        - name: atlas-operations
+          description: Inspect and operate MongoDB Atlas clusters in one project - list clusters, health metrics, pause or resume and scale (with human approval), and temporary IP access list entries.
+          example_input: "Show the health of cluster POV over the last 24 hours"
+    input_modes: ["text/plain"]
+    output_modes: ["text/plain"]
