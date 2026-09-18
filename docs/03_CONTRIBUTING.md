@@ -5,7 +5,7 @@ and, apart from two shared files, you should not need to touch anyone else's.
 
 ## Before you start
 
-1. Claim your row in `agents_ownership.md`.
+1. Claim your row in `00_agents_ownership.md`.
 2. Install and authenticate the `agentic` CLI, and start Docker.
 3. Copy `.env.example` to `.env` at the repository root and fill it in. Shared
    local services read this file. Your own agent's secrets go in its own `.env`.
@@ -22,7 +22,7 @@ and, apart from two shared files, you should not need to touch anyone else's.
 2. Add your entry to the root `agent.yaml`. CI fails if a workspace exists but
    is not listed, or if a listed path is missing.
 3. Add your `a2a` block with skills, and set `allowed_callers` to match the call
-   graph in `docs/agent-communication.md`.
+   graph in `docs/02_agent-communication.md`.
 4. Register the monorepo from the repository root:
 
        agentic init

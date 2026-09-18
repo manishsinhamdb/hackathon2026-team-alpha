@@ -28,7 +28,7 @@ change.
 ## Using it as a starting point
 
 Copy the folder, rename it to your slug, then work through
-`onboarding-an-existing-agent.md` from step 1. The parts you will certainly
+`01_onboarding-an-existing-agent.md` from step 1. The parts you will certainly
 change are the agent name, the skills in the `a2a` block, the system message,
 the tools, and the secrets in `.env.example`.
 
@@ -36,7 +36,7 @@ the tools, and the secrets in `.env.example`.
 
 - **Allowlists are empty.** The workspace IDs from the original environment were
   removed, because IDs are specific to a platform project. Fill them in after
-  registration, following the call graph in `agent-communication.md`.
+  registration, following the call graph in `02_agent-communication.md`.
 - **No `.agentic/` registration is committed.** Each agent registers into the
   team platform project on the first `agentic init` from the repository root.
 - **Review before change is enforced by the prompt, not by code.** The action

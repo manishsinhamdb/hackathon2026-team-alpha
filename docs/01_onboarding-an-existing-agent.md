@@ -20,7 +20,7 @@ Read it in full before you start. Steps 3 and 4 are the ones that go wrong.
 
 ### 1. Agree the name
 
-Take the slug from `agents_ownership.md`: lowercase, hyphens, unique in the
+Take the slug from `00_agents_ownership.md`: lowercase, hyphens, unique in the
 repository. Your folder, the `name` in your own `agent.yaml` and the entry in
 the root `agent.yaml` must all use it.
 
@@ -110,7 +110,7 @@ alone. Registration gives your agent a workspace ID.
 
 `allowed_callers` takes workspace IDs, not names, so it can only be completed
 once the agents that call you have been registered. Use the call graph in
-`docs/agent-communication.md`: list exactly the agents shown as your callers,
+`docs/02_agent-communication.md`: list exactly the agents shown as your callers,
 and nothing wider. An empty list means any agent in the project can call you,
 which is the wrong default for a shared project.
 
@@ -125,7 +125,7 @@ answers a direct request and that its intended caller can reach it.
 ### 9. Open the pull request
 
 Include: your workspace, your root `agent.yaml` entry, your `.env.example`, and
-your row updated in `agents_ownership.md`. Do not include secrets, `.agentic/`,
+your row updated in `00_agents_ownership.md`. Do not include secrets, `.agentic/`,
 logs or build output.
 
 ## Troubleshooting
