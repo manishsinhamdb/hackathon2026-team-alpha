@@ -6,3 +6,4 @@
   environment preparation to multi-agent calling.
 - `../03_CONTRIBUTING.md` — the per-agent workflow in this repository.
 - `../README.md` — the product specification.
+- `05_deploying.md` — how a build reaches the platform, and what a merge does not do.
