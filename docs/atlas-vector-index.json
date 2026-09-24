@@ -1,0 +1,15 @@
+{
+  "_comment": "Platform-lead setup step (Spec §5.5). Create this Atlas Vector Search index on the platform cluster's poc_builder.spec_embeddings collection with `db.spec_embeddings.createSearchIndex(...)` or the Atlas UI/CLI. The Draft Agent writes 1024-dim vectors via its Embedder (deterministic hash fallback when no provider is configured; swap in Voyage/memory-server without changing callers).",
+  "database": "poc_builder",
+  "collection": "spec_embeddings",
+  "name": "spec_vector_idx",
+  "type": "vectorSearch",
+  "definition": {
+    "fields": [
+      {"type": "vector", "path": "embedding", "numDimensions": 1024, "similarity": "cosine"},
+      {"type": "filter", "path": "poc_id"},
+      {"type": "filter", "path": "owner_user_id"},
+      {"type": "filter", "path": "section"}
+    ]
+  }
+}

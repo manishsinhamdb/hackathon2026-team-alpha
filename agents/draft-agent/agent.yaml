@@ -13,7 +13,12 @@ sandboxes:
         tools: []
     tool:
         secrets: ["*"]
-        tools: []
+        tools:
+            - draft_load
+            - draft_analyze
+            - draft_questions
+            - draft_generate
+            - draft_finalize
 version: 0.1.0
 network:
     egress_mode: allow_all
