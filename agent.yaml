@@ -9,19 +9,19 @@
 # Uncomment your row when your workspace exists.
 
 agents:
-  # - name: chat-agent
-  #   path: agents/chat-agent
-  # - name: draft-agent
-  #   path: agents/draft-agent
-  # - name: coding-orchestrator
-  #   path: agents/coding-orchestrator
-  # - name: data-seeding-agent
-  #   path: agents/data-seeding-agent
-  # - name: api-agent
-  #   path: agents/api-agent
-  # - name: frontend-agent
-  #   path: agents/frontend-agent
+  - name: chat-agent
+    path: agents/chat-agent
+  - name: draft-agent
+    path: agents/draft-agent
+  - name: coding-orchestrator
+    path: agents/coding-orchestrator
+  - name: data-seeding-agent
+    path: agents/data-seeding-agent
+  - name: api-agent
+    path: agents/api-agent
+  - name: frontend-agent
+    path: agents/frontend-agent
   - name: deploy-agent
     path: agents/deploy-agent
-  # - name: test-agent
-  #   path: agents/test-agent
+  - name: test-agent
+    path: agents/test-agent

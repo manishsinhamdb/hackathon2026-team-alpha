@@ -1,0 +1,29 @@
+# Data Seeding Agent — POC Builder Stage 2 sub-agent (Spec §6.4). Called by the Coding Orchestrator
+# over A2A with an AgentEnvelope JSON body; generates the deterministic seed script.
+name: data-seeding-agent
+entrypoint: agent_data_seeding_agent.main:app
+framework: langgraph
+features:
+    durable_workflow: true
+    memory: false
+# All generation runs in the Tool Pod; the Agent Pod holds no tools.
+sandboxes:
+    agent:
+        secrets: ["*"]
+        tools: []
+    tool:
+        secrets: ["*"]
+        tools: []
+version: 0.1.0
+network:
+    egress_mode: allow_all
+a2a:
+    enabled: true
+    # Fill with the Coding Orchestrator's workspace id after `agentic init` (environment-specific, see docs/05_deploying.md).
+    allowed_callers: []
+    skills:
+        - name: generate-seed
+          description: "Generates a deterministic, cap-respecting Node.js seeding script from schema_design.json and query patterns. Input and output are AgentEnvelope JSON (tool generate_seed)."
+          example_input: '{"request": {"poc_id": "poc_...", "run_id": "run_...", "task_id": "task_...", "caller": "coding_orchestrator", "agent": "data_seeding_agent", "tool": "generate_seed", "params": {"poc_id": "poc_...", "code_version": "v001", "mode": "generate", "inputs": {"schema_design_key": "pocs/poc_.../spec/v001/schema_design.json", "query_patterns_key": "pocs/poc_.../spec/v001/query_patterns.json"}}}}'
+    input_modes: ["text/plain"]
+    output_modes: ["text/plain"]

@@ -1,0 +1,29 @@
+# Frontend Agent — POC Builder Stage 2 sub-agent (Spec §6.6). Called by the Coding Orchestrator
+# over A2A with an AgentEnvelope JSON body; generates the React/Vite frontend from the API contract.
+name: frontend-agent
+entrypoint: agent_frontend_agent.main:app
+framework: langgraph
+features:
+    durable_workflow: true
+    memory: false
+# All generation runs in the Tool Pod; the Agent Pod holds no tools.
+sandboxes:
+    agent:
+        secrets: ["*"]
+        tools: []
+    tool:
+        secrets: ["*"]
+        tools: []
+version: 0.1.0
+network:
+    egress_mode: allow_all
+a2a:
+    enabled: true
+    # Fill with the Coding Orchestrator's workspace id after `agentic init` (environment-specific, see docs/05_deploying.md).
+    allowed_callers: []
+    skills:
+        - name: generate-frontend
+          description: "Produces a React 18 + Vite + TypeScript frontend demonstrating spec user stories using only the API contract, with data-testid attributes per user story. Input and output are AgentEnvelope JSON (tool generate_frontend)."
+          example_input: '{"request": {"poc_id": "poc_...", "run_id": "run_...", "task_id": "task_...", "caller": "coding_orchestrator", "agent": "frontend_agent", "tool": "generate_frontend", "params": {"poc_id": "poc_...", "code_version": "v001", "mode": "generate", "inputs": {"spec_key": "pocs/poc_.../spec/v001/poc_spec.md", "api_contract_key": "pocs/poc_.../spec/v001/api_contract.yaml"}}}}'
+    input_modes: ["text/plain"]
+    output_modes: ["text/plain"]

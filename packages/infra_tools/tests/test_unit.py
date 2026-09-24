@@ -31,7 +31,7 @@ def test_provision_modes_without_atlas(monkeypatch):
 
 def test_srv_uri_escapes():
     u = _srv_uri("pov.abc.mongodb.net", "poc_x", "p@ss/word", "poc_1")
-    assert "p%40ss%2Fword" in u and u.endswith("/poc_1?retryWrites=true&w=majority")
+    assert "p%40ss%2Fword" in u and u.endswith("/poc_1?authSource=admin&retryWrites=true&w=majority")
 
 
 def test_config_defaults(monkeypatch):

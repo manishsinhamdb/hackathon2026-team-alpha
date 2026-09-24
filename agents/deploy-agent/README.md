@@ -20,6 +20,9 @@ The LangGraph graph is the pipeline: `check_gate → provision_db → store_secr
 - Tests go to the Test Agent's `run_e2e` over A2A. Both callees reply `started`; the deploy run polls their `runs` document, so no A2A call approaches the 300 s ceiling.
 - Secrets: the POC `MONGODB_URI` goes to Secrets Manager (`msinha/poc-builder/{poc_id}/db`); EC2 reads it at boot through its instance role. It never appears in `runs.outputs`, logs or replies.
 
+### publish_frontend — why the public check runs from the instance
+`publish_frontend` rewrites the whole `nginx.conf` (no stock default server) and must confirm the site is publicly reachable before it records `outputs.urls`. It does that reachability check **from the EC2 instance itself** (`ssm.public_healthcheck_via_ssm` → `curl http://<public_ip>/` and `.../api/health`); an EC2 box reaches its own public IP back through the Internet Gateway, so the result is exactly what the internet sees. It deliberately does **not** rely on a check from the Tool Pod: the platform routes Tool Pod HTTP through an egress proxy that refuses raw-IP hosts (`egress denied: IP literals are not allowed … declare a hostname`) and answers with a proxy-generated `403`, which is not on the request path a real user takes. `ssm.http_healthcheck` is kept only as an advisory probe here — it logs its result (including a `proxy_denied` hint) but never fails the step. On failure the step's error carries the real evidence: which URL, its status, and the first 300 chars of the body.
+
 ## Local
 ```
 ../../scripts/vendor_packages.sh .      # copy shared packages into vendor/

@@ -28,7 +28,10 @@ def put_poc_secret(poc_id: str, payload: dict[str, str]) -> str:
             r = _client().create_secret(Name=name, SecretString=body, Tags=tags)
             return r["ARN"]
         except ClientError as e:
-            if e.response["Error"]["Code"] != "ResourceExistsException":
+            code = e.response["Error"]["Code"]
+            if code == "InvalidRequestException" and "deletion" in str(e):
+                _client().restore_secret(SecretId=name)  # was torn down within the 7-day window
+            elif code != "ResourceExistsException":
                 raise
             r = _client().put_secret_value(SecretId=name, SecretString=body)
             return r["ARN"]

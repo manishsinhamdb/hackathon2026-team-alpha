@@ -23,6 +23,7 @@ sandboxes:
             - deploy_record_repair_result
             - deploy_set_outputs
             - deploy_finish_run
+            - deploy_find_test_run
 version: 0.1.0
 network:
     egress_mode: allow_all

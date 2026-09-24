@@ -157,11 +157,26 @@ def run_step(run: dict[str, Any], step: str) -> dict[str, Any]:
         proxy = m["publish"]["api_proxy"]
         r = ssm.publish_frontend_nginx(o["instance_id"], poc_id, run_id, static_dir, proxy["path"], proxy["upstream"])
         if r["exit_code"] != 0:
-            return _err("PUBLISH_FAILED", r["stderr"] or r["stdout"], log_key=r.get("log_key"))
-        hc = ssm.http_healthcheck(f"http://{o['public_ip']}/api/health", 200, timeout_s=60)
-        if not hc["ok"]:
-            return _err("HEALTHCHECK_FAILED", f"public /api/health: {hc['body']}", component="backend")
-        return _ok(urls={"app": f"http://{o['public_ip']}/", "api": f"http://{o['public_ip']}/api", "health": f"http://{o['public_ip']}/api/health"})
+            # nginx failed to load the site; surface the nginx -t / restart output as evidence
+            return _err("PUBLISH_FAILED", (r["stderr"] or r["stdout"])[-2000:], log_key=r.get("log_key"))
+        api_path = proxy["path"]
+        # Authoritative reachability check runs FROM the instance (it reaches its own public IP through
+        # the IGW), so it reflects nginx as the internet sees it and does not depend on the Tool Pod's
+        # egress proxy, which refuses raw-IP hosts with a 403 (see README §publish_frontend).
+        pub = ssm.public_healthcheck_via_ssm(o["instance_id"], poc_id, run_id, o["public_ip"], api_path=api_path)
+        if not pub["ok"]:
+            msg = (f"public {api_path}/health -> {pub['health']['status'] or '?'} body[:300]={pub['health']['body'][:300]!r}; "
+                   f"public / -> {pub['root']['status'] or '?'} body[:120]={pub['root']['body'][:120]!r}")
+            return _err("HEALTHCHECK_FAILED", msg, component="backend", log_key=pub.get("log_key"))
+        # Best-effort: also probe from the Tool Pod, but never fail the step on a proxy-generated response.
+        try:
+            hc = ssm.http_healthcheck(f"http://{o['public_ip']}{api_path}/health", 200, timeout_s=15)
+            if not hc["ok"]:
+                log.info("publish_frontend: Tool Pod probe did not pass (status=%s proxy_denied=%s body=%r); "
+                         "SSM public check already passed, continuing", hc.get("status"), hc.get("proxy_denied"), (hc.get("body") or "")[:200])
+        except Exception as e:  # advisory only
+            log.info("publish_frontend: Tool Pod probe errored (%s); ignoring", e)
+        return _ok(urls={"app": f"http://{o['public_ip']}/", "api": f"http://{o['public_ip']}{api_path}", "health": f"http://{o['public_ip']}{api_path}/health"})
 
     if step == "write_deployment":
         steps_doc = [{"name": s["name"], "status": s["status"], **({"log_key": s["log_key"]} if s.get("log_key") else {}),
@@ -218,12 +233,12 @@ def _classify(step: str, error: dict[str, Any]) -> str:
 
 
 def teardown(poc_id: str, run_id: str) -> dict[str, Any]:
-    """Stage 5 (§6.7): terminate instance, revoke IP, drop DB/user or flex cluster, delete secret, release resources."""
+    """Stage 5 (§6.7): terminate instance, revoke IP, drop DB + delete user (or delete flex cluster), delete secret.
+    Driven by the cloud_resources ledger alone, so it works for runs that failed before deployment.json existed."""
     released, errors = [], []
-    poc = md.get_poc(poc_id)
-    dep = poc.get("deployment", {}) or {}
-    db = dep.get("db", {}) or {}
-    for res in md.list_active_resources(poc_id):
+    active = md.list_active_resources(poc_id)
+    mode = "flex_cluster" if any(r["type"] == "atlas_flex_cluster" for r in active) else "shared_db"
+    for res in active:
         rid, typ = res["resource_id"], res["type"]
         try:
             if typ == "ec2_instance":
@@ -231,7 +246,7 @@ def teardown(poc_id: str, run_id: str) -> dict[str, Any]:
             elif typ == "atlas_access_list_entry":
                 atlas.revoke_ip(rid)
             elif typ == "atlas_db_user":
-                pass  # dropped together with the database below
+                atlas.drop_poc_database(poc_id, mode, "", rid if mode == "shared_db" else None)
             elif typ == "atlas_flex_cluster":
                 atlas.delete_flex_cluster(rid, timeout_s=60)
             elif typ == "secret":
@@ -240,14 +255,5 @@ def teardown(poc_id: str, run_id: str) -> dict[str, Any]:
             released.append({"resource_id": rid, "type": typ})
         except Exception as e:  # keep going; report everything at the end
             errors.append({"resource_id": rid, "type": typ, "error": str(e)[:300]})
-    try:
-        if db.get("mode") == "shared_db":
-            user = next((r["resource_id"] for r in md.list_active_resources(poc_id) if r["type"] == "atlas_db_user"), None) or \
-                   next((r["resource_id"] for r in md._db().cloud_resources.find({"poc_id": poc_id, "type": "atlas_db_user"})), None)
-            atlas.drop_poc_database(poc_id, "shared_db", db.get("cluster_name", ""), user)
-            for r in md._db().cloud_resources.find({"poc_id": poc_id, "type": "atlas_db_user", "status": "active"}):
-                md.release_cloud_resource(r["resource_id"])
-    except Exception as e:
-        errors.append({"resource_id": poc_id, "type": "database", "error": str(e)[:300]})
     md.update_poc_status(poc_id, "torn_down")
     return {"released": released, "errors": errors, "remaining_active": len(md.list_active_resources(poc_id))}

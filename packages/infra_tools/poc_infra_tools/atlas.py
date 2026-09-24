@@ -59,19 +59,38 @@ def _password(n: int = 24) -> str:
 
 
 def _srv_uri(host: str, user: str, pwd: str, db: str) -> str:
-    return f"mongodb+srv://{quote_plus(user)}:{quote_plus(pwd)}@{host}/{db}?retryWrites=true&w=majority"
+    return f"mongodb+srv://{quote_plus(user)}:{quote_plus(pwd)}@{host}/{db}?authSource=admin&retryWrites=true&w=majority"
 
 
 def _short(poc_id: str) -> str:
     return poc_id[-10:].lower()
 
 
+def resolve_cluster_name(name: str) -> str:
+    """Return the cluster's exact name as Atlas knows it (scopes are case-sensitive and unvalidated)."""
+    c = _cfg()
+    names = [cl["name"] for cl in _req("GET", f"/groups/{c.atlas_project_id}/clusters").json().get("results", [])]
+    names += [cl["name"] for cl in _req("GET", f"/groups/{c.atlas_project_id}/flexClusters").json().get("results", [])]
+    for n in names:
+        if n.lower() == name.lower():
+            return n
+    raise InfraError("ATLAS_CLUSTER_NOT_FOUND", f"no cluster named {name!r} in project {c.atlas_project_id}; have {names}")
+
+
 def create_db_user(username: str, password: str, database_name: str, cluster_name: str) -> None:
     c = _cfg()
+    cluster_name = resolve_cluster_name(cluster_name)
     body = {"databaseName": "admin", "username": username, "password": password,
             "roles": [{"roleName": "readWrite", "databaseName": database_name}],
             "scopes": [{"name": cluster_name, "type": "CLUSTER"}]}
-    r = _req("POST", f"/groups/{c.atlas_project_id}/databaseUsers", json=body)
+    try:
+        r = _req("POST", f"/groups/{c.atlas_project_id}/databaseUsers", json=body)
+    except InfraError as e:
+        if "USER_ALREADY_EXISTS" not in str(e):
+            raise
+        # leftover from an earlier run: update in place (delete+create races on Atlas's side)
+        patch = {"password": password, "roles": body["roles"], "scopes": body["scopes"]}
+        r = _req("PATCH", f"/groups/{c.atlas_project_id}/databaseUsers/admin/{username}", json=patch)
     if r.status_code == 404:
         raise InfraError("ATLAS_API_ERROR", f"create user 404: {r.text[:200]}")
 
@@ -137,7 +156,7 @@ def provision_poc_database(poc_id: str, mode: str = "shared_db", external_uri: s
     if mode == "shared_db":
         if not c.atlas_sandbox_srv_host:
             raise InfraError("ATLAS_NOT_CONFIGURED", "ATLAS_SANDBOX_SRV_HOST not set")
-        cluster, host = c.atlas_sandbox_cluster, c.atlas_sandbox_srv_host
+        cluster, host = resolve_cluster_name(c.atlas_sandbox_cluster), c.atlas_sandbox_srv_host
         resources = [{"resource_id": username, "type": "atlas_db_user"}]
     elif mode == "flex_cluster":
         cluster = f"{c.resource_prefix}poc-{_short(poc_id)}"[:64]

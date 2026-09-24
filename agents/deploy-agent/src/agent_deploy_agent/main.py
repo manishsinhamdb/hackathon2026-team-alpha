@@ -32,7 +32,7 @@ from magenta_sdklanggraph import App
 
 from poc_contracts import Envelope, ContractError, new_id, validate
 from agent_deploy_agent import pipeline
-from agent_deploy_agent.a2a import A2AClient
+from agent_deploy_agent.a2a import A2AClient, invoke_tool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%H:%M:%S", stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -107,6 +107,25 @@ def deploy_get_run(run_id: str) -> str:
     """Return the runs document for a run_id (status, steps, outputs, error, repair_attempts)."""
     from poc_shared_tools import metadata as md
     return json.dumps(md.get_run(run_id), default=str)
+
+
+@app.tool(is_local=False, timeout=30)
+def deploy_find_test_run(deployment_run_id: str) -> str:
+    """Find the most recent test run that was started for a given deployment_run_id, or {"error": ...}.
+    Used to recover after an A2A call to the Test Agent times out or fails transiently."""
+    from poc_shared_tools import metadata as md
+    try:
+        doc = md._db().runs.find_one(
+            {"stage": "test", "inputs.deployment_run_id": deployment_run_id},
+            sort=[("started_at", -1)],
+        )
+        if not doc:
+            return json.dumps({"error": {"code": "TEST_RUN_NOT_FOUND",
+                                         "message": f"no test run for deployment {deployment_run_id}"}})
+        doc.pop("_id", None)
+        return json.dumps(doc, default=str)
+    except Exception as e:
+        return json.dumps({"error": {"code": "DB_ERROR", "message": str(e)[:500]}})
 
 
 @app.tool(is_local=False, timeout=30)
@@ -196,7 +215,7 @@ def build_agent() -> CompiledStateGraph:
     a2a = A2AClient(app)
 
     def call(name: str, **kw: Any) -> dict[str, Any]:
-        out = tools[name].invoke(kw)
+        out = invoke_tool(tools[name], kw)
         return json.loads(out) if isinstance(out, str) else out
 
     def reply(state: DeployState, response: dict[str, Any]) -> dict[str, Any]:
@@ -300,10 +319,35 @@ def build_agent() -> CompiledStateGraph:
         req = state["request"]
         env = Envelope.request(poc_id=state["poc_id"], run_id=state["run_id"], caller=AGENT_NAME, agent="test_agent", tool="run_e2e",
                                trace_id=req.get("trace_id"), params={"deployment_run_id": state["run_id"], "scope": "all"})
+        resp = None
         try:
             resp = a2a.invoke(a2a.find_agent("test_agent"), env)["response"]
-        except Exception as e:
-            return {"last_error": {"step": "run_tests", "code": "TEST_AGENT_UNAVAILABLE", "message": str(e)[:500]}}
+        except Exception as invoke_exc:
+            # A2A call failed or timed out — look up the test run by deployment_run_id;
+            # the Test Agent may have already created it (design decision 3).
+            fr = call("deploy_find_test_run", deployment_run_id=state["run_id"])
+            if "error" not in fr:
+                test_run = _poll_run(fr["run_id"], 120)
+                if test_run.get("status") in ("succeeded", "failed"):
+                    outs = test_run.get("outputs") or {}
+                    passed = test_run.get("status") == "succeeded" and int(outs.get("failed", 1)) == 0
+                    call("deploy_set_outputs", run_id=state["run_id"],
+                         outputs_json=json.dumps({"test_run_id": test_run.get("run_id", ""),
+                                                  "test_passed": passed,
+                                                  "test_report_key": outs.get("report_key")}))
+                    if passed:
+                        return {"step_index": idx + 1, "last_error": {}}
+                    comp = outs.get("suspected_component") or "unknown"
+                    err = {"step": "run_tests", "code": "TEST_FAILURE",
+                           "message": f"{outs.get('failed', '?')} test(s) failed", "component": comp,
+                           "test_result_ids": outs.get("failed_ids", [])}
+                    if comp in ("seed", "backend", "frontend"):
+                        err["step"] = {"seed": "seed_data", "backend": "build_backend", "frontend": "build_frontend"}[comp]
+                        return {"last_error": err}
+                    return {"last_error": err | {"exhausted": True}}
+            # No run found within 120 s — give up
+            return {"last_error": {"step": "run_tests", "code": "TEST_AGENT_UNAVAILABLE",
+                                   "message": str(invoke_exc)[:500]}}
         if resp["status"] == "started":
             test_run = _poll_run(resp["result"]["run_id"], TEST_WAIT_S)
         elif resp["status"] == "succeeded":
