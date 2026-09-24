@@ -13,7 +13,14 @@ sandboxes:
         tools: []
     tool:
         secrets: ["*"]
-        tools: []
+        tools:
+            - orch_start_run
+            - orch_load_inputs
+            - orch_begin_task
+            - orch_end_task
+            - orch_assemble
+            - orch_finalize
+            - orch_get_bundle
 version: 0.1.0
 network:
     egress_mode: allow_all
