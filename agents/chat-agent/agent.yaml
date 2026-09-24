@@ -6,14 +6,28 @@ framework: langgraph
 features:
     durable_workflow: true
     memory: true
-# All coordination runs in the Agent Pod; the Tool Pod holds no tools yet.
+# A2A-calling tools run in the Agent Pod (is_local=True); platform DB + S3 tools run in the Tool Pod.
 sandboxes:
     agent:
         secrets: ["*"]
-        tools: []
+        tools:
+            - chat_call_draft
+            - chat_start_code_run
+            - chat_start_deploy_run
+            - chat_run_tests
+            - chat_teardown
     tool:
         secrets: ["*"]
-        tools: []
+        tools:
+            - chat_create_poc
+            - chat_get_poc
+            - chat_record_approval
+            - chat_get_run_status
+            - chat_find_run
+            - chat_list_artifacts
+            - chat_read_artifact
+            - chat_presign
+            - chat_append_message
 version: 0.1.0
 network:
     egress_mode: allow_all
