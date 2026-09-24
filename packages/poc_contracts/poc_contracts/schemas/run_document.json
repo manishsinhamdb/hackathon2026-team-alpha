@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/run_document.json",
+  "title": "runs collection document",
+  "type": "object",
+  "required": [
+    "run_id",
+    "poc_id",
+    "stage",
+    "status",
+    "requested_by",
+    "started_by_agent",
+    "steps",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "poc_id": {
+      "type": "string",
+      "pattern": "^poc_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "code",
+        "deploy",
+        "test",
+        "teardown"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "waiting_user",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "requested_by": {
+      "type": "string"
+    },
+    "started_by_agent": {
+      "type": "string"
+    },
+    "current_step": {
+      "type": "string"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "log_key": {
+            "type": "string",
+            "pattern": "^pocs/poc_[0-9A-HJKMNP-TV-Z]{26}/.+"
+          },
+          "output_ref": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "inputs": {
+      "type": "object"
+    },
+    "outputs": {
+      "type": "object"
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "component": {
+          "type": "string",
+          "enum": [
+            "seed",
+            "backend",
+            "frontend"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "failure_key": {
+          "type": "string",
+          "pattern": "^pocs/poc_[0-9A-HJKMNP-TV-Z]{26}/.+"
+        }
+      }
+    },
+    "repair_attempts": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 3
+      }
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "trace_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

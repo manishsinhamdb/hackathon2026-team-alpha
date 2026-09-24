@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/poc_spec_frontmatter.json",
+  "title": "poc_spec.md YAML front matter",
+  "type": "object",
+  "required": [
+    "poc_id",
+    "spec_version",
+    "title",
+    "stack",
+    "user_stories",
+    "success_criteria",
+    "seed_requirements",
+    "assumptions",
+    "approved"
+  ],
+  "properties": {
+    "poc_id": {
+      "type": "string",
+      "pattern": "^poc_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "spec_version": {
+      "type": "string",
+      "pattern": "^v[0-9]{3}$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 3
+    },
+    "stack": {
+      "type": "object",
+      "required": [
+        "backend",
+        "frontend",
+        "database"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "node-express"
+          ]
+        },
+        "frontend": {
+          "type": "string",
+          "enum": [
+            "react-vite"
+          ]
+        },
+        "database": {
+          "type": "string",
+          "enum": [
+            "mongodb"
+          ]
+        }
+      }
+    },
+    "user_stories": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "actor",
+          "acceptance",
+          "testids"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^us-[0-9]{2}$"
+          },
+          "title": {
+            "type": "string"
+          },
+          "actor": {
+            "type": "string"
+          },
+          "acceptance": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "testids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^us-[0-9]{2}-[a-z0-9-]+$"
+            },
+            "minItems": 1
+          }
+        }
+      }
+    },
+    "success_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "statement",
+          "automatable"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^sc-[0-9]{2}$"
+          },
+          "statement": {
+            "type": "string"
+          },
+          "automatable": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "seed_requirements": {
+      "type": "object",
+      "required": [
+        "max_docs_per_collection"
+      ],
+      "properties": {
+        "max_docs_per_collection": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "realism": {
+          "type": "string"
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "approved": {
+      "type": "boolean"
+    }
+  }
+}

@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/deployment.json",
+  "title": "deployment.json",
+  "type": "object",
+  "required": [
+    "poc_id",
+    "run_id",
+    "code_version",
+    "status",
+    "instance",
+    "database",
+    "urls",
+    "env",
+    "steps"
+  ],
+  "properties": {
+    "poc_id": {
+      "type": "string",
+      "pattern": "^poc_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "code_version": {
+      "type": "string",
+      "pattern": "^v[0-9]{3}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "deploying",
+        "deployed",
+        "failed",
+        "torn_down"
+      ]
+    },
+    "instance": {
+      "type": "object",
+      "required": [
+        "instance_id",
+        "instance_type",
+        "public_ip",
+        "region",
+        "ttl_expires_at"
+      ],
+      "properties": {
+        "instance_id": {
+          "type": "string",
+          "pattern": "^i-[a-f0-9]+$"
+        },
+        "instance_type": {
+          "type": "string",
+          "enum": [
+            "t3.small",
+            "t3.medium",
+            "t3.large"
+          ]
+        },
+        "public_ip": {
+          "type": "string",
+          "format": "ipv4"
+        },
+        "region": {
+          "type": "string"
+        },
+        "ttl_expires_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "database": {
+      "type": "object",
+      "required": [
+        "mode",
+        "cluster_name",
+        "database_name",
+        "secret_arn"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "shared_db",
+            "flex_cluster"
+          ]
+        },
+        "cluster_name": {
+          "type": "string"
+        },
+        "database_name": {
+          "type": "string"
+        },
+        "secret_arn": {
+          "type": "string",
+          "pattern": "^arn:aws:secretsmanager:"
+        }
+      }
+    },
+    "urls": {
+      "type": "object",
+      "required": [
+        "app",
+        "api",
+        "health"
+      ],
+      "properties": {
+        "app": {
+          "type": "string",
+          "format": "uri"
+        },
+        "api": {
+          "type": "string",
+          "format": "uri"
+        },
+        "health": {
+          "type": "string",
+          "format": "uri"
+        }
+      }
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "seed_summary": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer"
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ended_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "log_key": {
+            "type": "string",
+            "pattern": "^pocs/poc_[0-9A-HJKMNP-TV-Z]{26}/.+"
+          },
+          "output_ref": {
+            "type": "string"
+          },
+          "duration_ms": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  }
+}

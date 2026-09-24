@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/task_document.json",
+  "title": "tasks collection document",
+  "type": "object",
+  "required": [
+    "task_id",
+    "run_id",
+    "poc_id",
+    "seq",
+    "agent",
+    "tool",
+    "status",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "pattern": "^task_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "poc_id": {
+      "type": "string",
+      "pattern": "^poc_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "agent": {
+      "type": "string"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "generate",
+        "contract",
+        "code",
+        "repair"
+      ]
+    },
+    "tool": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "needs_clarification"
+      ]
+    },
+    "input_ref": {
+      "type": "string"
+    },
+    "output_ref": {
+      "type": "string"
+    },
+    "duration_ms": {
+      "type": "integer"
+    },
+    "token_usage": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "integer"
+        },
+        "output": {
+          "type": "integer"
+        }
+      }
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

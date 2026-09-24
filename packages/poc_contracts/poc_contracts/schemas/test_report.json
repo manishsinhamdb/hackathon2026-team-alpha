@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/test_report.json",
+  "title": "test_report.json",
+  "type": "object",
+  "required": [
+    "poc_id",
+    "run_id",
+    "deployment_run_id",
+    "base_url",
+    "summary",
+    "results",
+    "success_criteria"
+  ],
+  "properties": {
+    "poc_id": {
+      "type": "string",
+      "pattern": "^poc_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "deployment_run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "base_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "total",
+        "passed",
+        "failed",
+        "skipped",
+        "not_automatable",
+        "duration_ms"
+      ],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_automatable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "api_smoke",
+              "user_story"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed",
+              "skipped"
+            ]
+          },
+          "duration_ms": {
+            "type": "integer"
+          },
+          "suspected_component": {
+            "type": "string",
+            "enum": [
+              "seed",
+              "backend",
+              "frontend",
+              "unknown"
+            ]
+          },
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "console_errors": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "failed_requests": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "http_status": {
+                "type": "integer"
+              }
+            }
+          },
+          "artifacts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^pocs/poc_[0-9A-HJKMNP-TV-Z]{26}/.+"
+            }
+          }
+        },
+        "if": {
+          "properties": {
+            "status": {
+              "const": "failed"
+            }
+          }
+        },
+        "then": {
+          "required": [
+            "suspected_component",
+            "evidence"
+          ]
+        }
+      }
+    },
+    "success_criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^sc-[0-9]{2}$"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "passed",
+              "failed",
+              "not_automatable"
+            ]
+          },
+          "measured": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

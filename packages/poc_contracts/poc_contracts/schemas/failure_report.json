@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/failure_report.json",
+  "title": "FailureReport",
+  "type": "object",
+  "required": [
+    "poc_id",
+    "deploy_run_id",
+    "code_version",
+    "component",
+    "stage_step",
+    "failure_class",
+    "attempt",
+    "max_attempts"
+  ],
+  "properties": {
+    "poc_id": {
+      "type": "string",
+      "pattern": "^poc_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "deploy_run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "code_version": {
+      "type": "string",
+      "pattern": "^v[0-9]{3}$"
+    },
+    "component": {
+      "type": "string",
+      "enum": [
+        "seed",
+        "backend",
+        "frontend"
+      ]
+    },
+    "stage_step": {
+      "type": "string"
+    },
+    "failure_class": {
+      "type": "string",
+      "enum": [
+        "BUILD_ERROR",
+        "RUNTIME_ERROR",
+        "SEED_ERROR",
+        "HEALTHCHECK_FAILED",
+        "TEST_FAILURE",
+        "CONTRACT_MISMATCH",
+        "GUARDRAIL_VIOLATION"
+      ]
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "stdout_key": {
+      "type": "string",
+      "pattern": "^pocs/poc_[0-9A-HJKMNP-TV-Z]{26}/.+"
+    },
+    "stderr_excerpt": {
+      "type": "string",
+      "maxLength": 8000
+    },
+    "test_result_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3
+    },
+    "hints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

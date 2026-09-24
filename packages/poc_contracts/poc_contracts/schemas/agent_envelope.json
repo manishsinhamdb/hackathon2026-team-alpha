@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/agent_envelope.json",
+  "title": "AgentEnvelope",
+  "type": "object",
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "poc_id",
+        "run_id",
+        "task_id",
+        "caller",
+        "agent",
+        "tool",
+        "params"
+      ],
+      "properties": {
+        "poc_id": {
+          "type": "string",
+          "pattern": "^poc_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "task_id": {
+          "type": "string",
+          "pattern": "^task_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "trace_id": {
+          "type": "string"
+        },
+        "caller": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "generate",
+            "contract",
+            "code",
+            "repair"
+          ]
+        },
+        "params": {
+          "type": "object"
+        },
+        "deadline_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "budget": {
+          "type": "object",
+          "properties": {
+            "max_tokens": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "kind",
+        "key"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "spec",
+            "schema",
+            "query_patterns",
+            "contract",
+            "code",
+            "bundle",
+            "deployment",
+            "report",
+            "failure",
+            "clarifications"
+          ]
+        },
+        "key": {
+          "type": "string",
+          "pattern": "^pocs/poc_[0-9A-HJKMNP-TV-Z]{26}/.+"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^v[0-9]{3}$"
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z_]+$"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "object"
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "status"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "pattern": "^task_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "succeeded",
+            "failed",
+            "needs_clarification",
+            "started"
+          ]
+        },
+        "result": {
+          "type": "object"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        },
+        "error": {
+          "$ref": "#/$defs/error"
+        },
+        "usage": {
+          "type": "object",
+          "properties": {
+            "input_tokens": {
+              "type": "integer"
+            },
+            "output_tokens": {
+              "type": "integer"
+            },
+            "duration_ms": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "failed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "error"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "needs_clarification"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "result"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "required": [
+        "request"
+      ],
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/request"
+        }
+      },
+      "not": {
+        "required": [
+          "response"
+        ]
+      }
+    },
+    {
+      "required": [
+        "response"
+      ],
+      "properties": {
+        "response": {
+          "$ref": "#/$defs/response"
+        }
+      },
+      "not": {
+        "required": [
+          "request"
+        ]
+      }
+    }
+  ]
+}

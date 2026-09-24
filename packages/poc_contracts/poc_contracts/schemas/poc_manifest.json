@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/poc_manifest.json",
+  "title": "poc.manifest.json",
+  "type": "object",
+  "required": [
+    "poc_id",
+    "code_version",
+    "spec_version",
+    "stack",
+    "components",
+    "contract_key",
+    "bundle_key",
+    "bundle_sha256",
+    "guardrail_scan",
+    "produced_by"
+  ],
+  "properties": {
+    "poc_id": {
+      "type": "string",
+      "pattern": "^poc_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "code_version": {
+      "type": "string",
+      "pattern": "^v[0-9]{3}$"
+    },
+    "spec_version": {
+      "type": "string",
+      "pattern": "^v[0-9]{3}$"
+    },
+    "stack": {
+      "type": "object",
+      "required": [
+        "backend",
+        "frontend",
+        "database"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "node-express"
+          ]
+        },
+        "frontend": {
+          "type": "string",
+          "enum": [
+            "react-vite"
+          ]
+        },
+        "database": {
+          "type": "string",
+          "enum": [
+            "mongodb"
+          ]
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "seed",
+          "backend",
+          "frontend"
+        ]
+      },
+      "minItems": 3,
+      "uniqueItems": true
+    },
+    "contract_key": {
+      "type": "string",
+      "pattern": "^pocs/poc_[0-9A-HJKMNP-TV-Z]{26}/.+"
+    },
+    "bundle_key": {
+      "type": "string",
+      "pattern": "^pocs/poc_[0-9A-HJKMNP-TV-Z]{26}/.+"
+    },
+    "bundle_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "guardrail_scan": {
+      "type": "object",
+      "required": [
+        "ok",
+        "scanned_at"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "scanned_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "violations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "file",
+              "rule"
+            ],
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer"
+              },
+              "rule": {
+                "type": "string"
+              },
+              "snippet": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "produced_by": {
+      "type": "object",
+      "required": [
+        "run_id"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "repairs_of": {
+          "type": "string",
+          "pattern": "^v[0-9]{3}$"
+        },
+        "changed_components": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "seed",
+              "backend",
+              "frontend"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

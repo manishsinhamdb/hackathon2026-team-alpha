@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/poc_document.json",
+  "title": "pocs collection document",
+  "type": "object",
+  "required": [
+    "poc_id",
+    "title",
+    "owner_user_id",
+    "status",
+    "stack",
+    "s3_prefix",
+    "current_versions",
+    "approvals",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "poc_id": {
+      "type": "string",
+      "pattern": "^poc_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "title": {
+      "type": "string"
+    },
+    "owner_user_id": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "drafting",
+        "spec_ready",
+        "coding",
+        "code_ready",
+        "deploying",
+        "deployed",
+        "testing",
+        "tested",
+        "failed",
+        "torn_down"
+      ]
+    },
+    "stack": {
+      "type": "object",
+      "required": [
+        "backend",
+        "frontend",
+        "database"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "node-express"
+          ]
+        },
+        "frontend": {
+          "type": "string",
+          "enum": [
+            "react-vite"
+          ]
+        },
+        "database": {
+          "type": "string",
+          "enum": [
+            "mongodb"
+          ]
+        }
+      }
+    },
+    "s3_prefix": {
+      "type": "string",
+      "pattern": "^pocs/poc_[0-9A-HJKMNP-TV-Z]{26}/$"
+    },
+    "current_versions": {
+      "type": "object",
+      "properties": {
+        "spec": {
+          "type": "string",
+          "pattern": "^v[0-9]{3}$"
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^v[0-9]{3}$"
+        }
+      }
+    },
+    "approvals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "stage",
+          "version",
+          "approved_by",
+          "at",
+          "implicit"
+        ],
+        "properties": {
+          "stage": {
+            "type": "string",
+            "enum": [
+              "spec_approved",
+              "code_approved"
+            ]
+          },
+          "version": {
+            "type": "string",
+            "pattern": "^v[0-9]{3}$"
+          },
+          "approved_by": {
+            "type": "string"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "implicit": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "deployment": {
+      "type": "object"
+    },
+    "last_test": {
+      "type": "object"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "guardrail_overrides": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/query_patterns.json",
+  "title": "query_patterns.json",
+  "type": "object",
+  "required": [
+    "patterns"
+  ],
+  "properties": {
+    "patterns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "user_story_ids",
+          "name",
+          "description",
+          "collections",
+          "pseudocode"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^qp-[0-9]{2}$"
+          },
+          "user_story_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^us-[0-9]{2}$"
+            },
+            "minItems": 1
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "collections": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "pseudocode": {
+            "type": "string"
+          },
+          "aggregation_sketch": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "expected_latency_ms_p95": {
+            "type": "integer"
+          },
+          "supporting_indexes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "collection",
+                "keys"
+              ],
+              "properties": {
+                "collection": {
+                  "type": "string"
+                },
+                "keys": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

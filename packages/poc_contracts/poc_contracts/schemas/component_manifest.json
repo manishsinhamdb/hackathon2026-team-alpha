@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://poc-builder/schemas/component_manifest.json",
+  "title": "component.manifest.json",
+  "type": "object",
+  "required": [
+    "component",
+    "runtime",
+    "workdir",
+    "entrypoints",
+    "env"
+  ],
+  "properties": {
+    "component": {
+      "type": "string",
+      "enum": [
+        "seed",
+        "backend",
+        "frontend"
+      ]
+    },
+    "runtime": {
+      "type": "string",
+      "enum": [
+        "node20"
+      ]
+    },
+    "workdir": {
+      "type": "string"
+    },
+    "entrypoints": {
+      "type": "object",
+      "required": [
+        "install"
+      ],
+      "properties": {
+        "install": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "build": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "start": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "seed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "healthcheck": {
+          "type": "object",
+          "required": [
+            "type",
+            "url",
+            "expect"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "http"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "expect": {
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
+    "env": {
+      "type": "object",
+      "required": [
+        "required"
+      ],
+      "properties": {
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "optional": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ports": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      }
+    },
+    "expected_output": {
+      "type": "string",
+      "enum": [
+        "json_summary_last_line"
+      ]
+    },
+    "static_dir": {
+      "type": "string"
+    },
+    "publish": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "nginx_static"
+          ]
+        },
+        "api_proxy": {
+          "type": "object",
+          "required": [
+            "path",
+            "upstream"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "upstream": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "component": {
+            "const": "backend"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "entrypoints": {
+            "required": [
+              "build",
+              "start",
+              "healthcheck"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "component": {
+            "const": "seed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "entrypoints": {
+            "required": [
+              "seed"
+            ]
+          }
+        },
+        "required": [
+          "expected_output"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "component": {
+            "const": "frontend"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "entrypoints": {
+            "required": [
+              "build"
+            ]
+          }
+        },
+        "required": [
+          "static_dir",
+          "publish"
+        ]
+      }
+    }
+  ]
+}
