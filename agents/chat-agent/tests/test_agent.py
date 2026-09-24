@@ -12,6 +12,24 @@ POC = new_id("poc")
 
 
 # =============================================================================
+# A2A reply unwrapping (the OE wraps the callee's envelope under result/status)
+# =============================================================================
+
+def test_unwrap_envelope_handles_oe_wrapper():
+    from agent_chat_agent.a2a import _unwrap_envelope
+    inner = {"task_id": "task_x", "status": "succeeded", "result": {"spec_version": "v001"}}
+    # OE shape: {"status":"completed","result":"<json string of {response: ...}>","error":null}
+    wrapped = {"status": "completed", "result": json.dumps({"response": inner}), "error": None}
+    assert _unwrap_envelope(wrapped)["response"] == inner
+    # already-normalised shape passes through
+    assert _unwrap_envelope({"response": inner})["response"] == inner
+    # a bare response envelope gets wrapped
+    assert _unwrap_envelope(inner)["response"] == inner
+    # result as a dict carrying response
+    assert _unwrap_envelope({"result": {"response": inner}})["response"] == inner
+
+
+# =============================================================================
 # tool behaviour
 # =============================================================================
 

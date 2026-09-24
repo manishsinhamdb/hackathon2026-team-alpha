@@ -343,6 +343,20 @@ def parse_output(text: str) -> dict[str, Any]:
     return obj
 
 
+_DEFAULT_FRONTEND_README = (
+    "# Frontend\n\nVite + React 18 + TypeScript single-page app. `npm ci && npm run build` produces `dist/`.\n"
+    "The API base URL is relative (`/api`) so the backend that serves the build also serves the API.\n"
+    "One route per user story; each page carries the `data-testid`s declared in the spec.\n"
+)
+
+
+def _backfill_docs(files: dict[str, str]) -> dict[str, str]:
+    """Backfill trivial, build-irrelevant docs the LLM occasionally omits (e.g. FRONTEND_README.md), so a
+    missing README never fails an otherwise-valid generation. Never overwrites content the model produced."""
+    files.setdefault("FRONTEND_README.md", _DEFAULT_FRONTEND_README)
+    return files
+
+
 def validate_files(files: dict[str, str], testids: list[str]) -> list[str]:
     errors: list[str] = []
     for f in REQUIRED_FILES:
@@ -393,6 +407,7 @@ def generate(inputs: dict[str, Any], mode: str = "code", failure: dict[str, Any]
         text = resp.content if isinstance(resp.content, str) else str(resp.content)
         try:
             obj = parse_output(text)
+            _backfill_docs(obj["files"])
             errs = validate_files(obj["files"], testids)
             if not errs:
                 return obj["files"], usage

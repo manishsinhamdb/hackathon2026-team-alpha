@@ -78,6 +78,15 @@ def test_generate_retries_when_testids_missing_then_succeeds():
     assert usage["input_tokens"] == 6
 
 
+def test_generate_backfills_missing_readme():
+    files_no_readme = _valid_files(include_testids=True)
+    files_no_readme.pop("FRONTEND_README.md", None)
+    llm = FakeLLM([json.dumps({"files": files_no_readme})])
+    files, _ = pipeline.generate({"spec": SPEC, "contract_yaml": CONTRACT_YAML}, "code", llm=llm)
+    assert "FRONTEND_README.md" in files                 # backfilled, not fatal
+    assert len(llm.calls) == 1                            # no retry needed
+
+
 def test_missing_testid_is_flagged():
     errs = pipeline.validate_files(_valid_files(include_testids=False), pipeline.all_testids(SPEC))
     assert any("data-testids" in e for e in errs)

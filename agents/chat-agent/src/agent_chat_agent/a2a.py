@@ -73,12 +73,39 @@ class A2AClient:
                 args[k] = agent.get("workspace_id") or agent.get("id") or agent.get("agent_id") or agent.get("name") or agent.get("url")
         log.info("A2A invoke %s args=%s", t.name, {k: (v if k in ("timeout",) else str(v)[:60]) for k, v in args.items()})
         out = invoke_tool(t, args)
+        log.info("A2A raw reply type=%s repr=%s", type(out).__name__, repr(out)[:600])
         text = out if isinstance(out, str) else json.dumps(out)
         try:
-            return json.loads(_extract_json(text))
+            return _unwrap_envelope(json.loads(_extract_json(text)))
         except (json.JSONDecodeError, ValueError):
             return {"response": {"task_id": envelope["request"]["task_id"], "status": "failed",
                                  "error": {"code": "A2A_UNPARSEABLE", "message": text[:500]}}}
+
+
+def _unwrap_envelope(obj: Any) -> dict[str, Any]:
+    """The OE returns the callee's final message wrapped (e.g. {"result": "<envelope json>", "status": ...}).
+    Normalise any of these shapes to a dict carrying the AgentEnvelope under "response"."""
+    if not isinstance(obj, dict):
+        return {"response": {"status": "failed", "error": {"code": "A2A_BAD_REPLY", "message": str(obj)[:300]}}}
+    if "response" in obj:
+        return obj
+    res = obj.get("result")
+    if isinstance(res, str):
+        try:
+            inner = json.loads(_extract_json(res))
+            if isinstance(inner, dict) and "response" in inner:
+                return inner
+            if isinstance(inner, dict) and ("status" in inner or "task_id" in inner):
+                return {"response": inner}
+        except (json.JSONDecodeError, ValueError):
+            pass
+    if isinstance(res, dict) and "response" in res:
+        return res
+    if isinstance(res, dict) and ("status" in res or "task_id" in res):
+        return {"response": res}
+    if "status" in obj or "task_id" in obj:  # a bare response envelope
+        return {"response": obj}
+    return {"response": {"status": "failed", "error": {"code": "A2A_NO_RESPONSE", "message": json.dumps(obj)[:300]}}}
 
 
 def _extract_json(text: str) -> str:

@@ -3,8 +3,11 @@
 name: chat-agent
 entrypoint: agent_chat_agent.main:app
 framework: langgraph
+# durable_workflow is OFF: this thin coordinator mints ULIDs and calls specialists over A2A on every
+# turn, so its tool outputs are non-deterministic and cannot satisfy the durable-replay guard. Durability
+# lives in the specialists' background `runs` documents, not in a chat turn. Memory stays on.
 features:
-    durable_workflow: true
+    durable_workflow: false
     memory: true
 # A2A-calling tools run in the Agent Pod (is_local=True); platform DB + S3 tools run in the Tool Pod.
 sandboxes:
