@@ -1,0 +1,19 @@
+[project]
+name = "poc-shared-tools"
+version = "0.1.0"
+description = "Shared S3 / platform metadata / secrets / guardrail tools for POC Builder agents (Spec §7)"
+requires-python = ">=3.11"
+dependencies = ["boto3>=1.34", "pymongo>=4.6", "poc-contracts"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.uv.sources]
+poc-contracts = { path = "../poc_contracts", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["poc_shared_tools"]
