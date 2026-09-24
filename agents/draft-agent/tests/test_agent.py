@@ -180,6 +180,19 @@ def test_generate_raises_on_connection_string_leak():
         pipeline.generate({}, POC, "v001", llm=llm)
 
 
+def test_generate_drops_malformed_aggregation_sketch():
+    """LLM sometimes emits aggregation_sketch as strings; the optional field is dropped, not fatal."""
+    obj = _good_obj()
+    obj["query_patterns"]["patterns"][0]["aggregation_sketch"] = ["$match: { x: 1 }", "$unwind: '$items'"]
+    obj["query_patterns"]["patterns"][1]["supporting_indexes"] = ["items.sku_1"]  # wrong shape too
+    llm = FakeLLM([json.dumps(obj)])
+    result, _ = pipeline.generate({}, POC, "v001", llm=llm)
+    qp = json.loads(result["files"]["query_patterns.json"])
+    validate("query_patterns", qp)  # must still validate
+    assert "aggregation_sketch" not in qp["patterns"][0]
+    assert "supporting_indexes" not in qp["patterns"][1]
+
+
 def test_chunk_spec_by_section():
     llm = FakeLLM([json.dumps(_good_obj())])
     result, _ = pipeline.generate({}, POC, "v001", llm=llm)

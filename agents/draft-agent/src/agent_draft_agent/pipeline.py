@@ -508,7 +508,7 @@ def assemble(poc_id: str, spec_version: str, obj: dict[str, Any]) -> dict[str, A
             seed["count"] = min(seed["count"], cap)
     validate("schema_design", schema_design)
 
-    query_patterns = dict(obj.get("query_patterns") or {})
+    query_patterns = _sanitize_query_patterns(dict(obj.get("query_patterns") or {}))
     validate("query_patterns", query_patterns)
 
     sem = validate_spec_semantics(front_matter, query_patterns)
@@ -518,6 +518,25 @@ def assemble(poc_id: str, spec_version: str, obj: dict[str, Any]) -> dict[str, A
     spec_md = render_spec_md(front_matter, obj.get("sections", {}))
     return {"front_matter": front_matter, "schema_design": schema_design,
             "query_patterns": query_patterns, "spec_md": spec_md}
+
+
+def _sanitize_query_patterns(qp: dict[str, Any]) -> dict[str, Any]:
+    """Drop optional fields the LLM sometimes emits in the wrong shape rather than failing the whole draft.
+
+    `aggregation_sketch` must be an array of pipeline-stage OBJECTS; models occasionally emit an array of
+    strings (e.g. "$match: {...}"). Since the field is optional and the pseudocode already carries the
+    logic, drop a malformed sketch instead of rejecting the artifact. Same for `supporting_indexes`.
+    """
+    for p in qp.get("patterns", []):
+        if not isinstance(p, dict):
+            continue
+        sketch = p.get("aggregation_sketch")
+        if sketch is not None and not (isinstance(sketch, list) and all(isinstance(s, dict) for s in sketch)):
+            p.pop("aggregation_sketch", None)
+        idx = p.get("supporting_indexes")
+        if idx is not None and not (isinstance(idx, list) and all(isinstance(s, dict) and "collection" in s and "keys" in s for s in idx)):
+            p.pop("supporting_indexes", None)
+    return qp
 
 
 def _clean_seed_requirements(sr: dict[str, Any]) -> dict[str, Any]:
