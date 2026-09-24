@@ -21,7 +21,7 @@ agents:
   #   path: agents/api-agent
   # - name: frontend-agent
   #   path: agents/frontend-agent
-  # - name: deploy-agent
-  #   path: agents/deploy-agent
+  - name: deploy-agent
+    path: agents/deploy-agent
   # - name: test-agent
   #   path: agents/test-agent

@@ -1,0 +1,38 @@
+# Deploy Agent — POC Builder Stage 3–5 (Spec §6.7). Called by the Chat Agent over A2A with an
+# AgentEnvelope JSON body; calls the Coding Orchestrator (repair_component) and the Test Agent (run_e2e).
+name: deploy-agent
+entrypoint: agent_deploy_agent.main:app
+framework: langgraph
+features:
+    durable_workflow: true
+    memory: false
+# All cloud work runs in the Tool Pod; nothing here interrupts, so the agent sandbox holds no tools.
+sandboxes:
+    agent:
+        secrets: ["*"]
+        tools: []
+    tool:
+        secrets: ["*"]
+        tools:
+            - deploy_start_run
+            - deploy_execute_step
+            - deploy_get_run
+            - deploy_get_deployment
+            - deploy_teardown
+            - deploy_build_failure_report
+            - deploy_record_repair_result
+            - deploy_set_outputs
+            - deploy_finish_run
+version: 0.1.0
+network:
+    egress_mode: allow_all
+a2a:
+    enabled: true
+    # Fill with the Chat Agent's workspace id after `agentic init` (environment-specific, see docs/05_deploying.md).
+    allowed_callers: []
+    skills:
+        - name: deploy-operations
+          description: Deploys an approved POC code version - provisions the POC MongoDB database, launches and bootstraps EC2, seeds, builds, starts and publishes the app through SSM, runs end-to-end tests via the Test Agent, drives bounded repairs through the Coding Orchestrator, and tears everything down. Input and output are AgentEnvelope JSON (tools start_deploy_run, resume_run, teardown_poc, get_deployment, get_run_status).
+          example_input: '{"request": {"poc_id": "poc_...", "run_id": "run_...", "task_id": "task_...", "caller": "chat_agent", "agent": "deploy_agent", "tool": "start_deploy_run", "params": {"code_version": "v001", "options": {"db_mode": "shared_db"}}}}'
+    input_modes: ["text/plain"]
+    output_modes: ["text/plain"]
