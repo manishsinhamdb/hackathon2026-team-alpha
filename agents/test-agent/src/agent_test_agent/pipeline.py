@@ -53,6 +53,7 @@ def generate_plan(
             "operationId": op["operationId"],
             "method": op["method"],
             "path": op["path"],
+            "params": op.get("params", []),
             "expect": [200],
         }
         for op in operations
@@ -125,25 +126,48 @@ def _http_get(url: str, timeout: int = 10) -> tuple[int, Any]:
         return 0, {"error": str(e)}
 
 
-def resolve_path_param(api_url: str, param_name: str, operations: list[dict[str, Any]]) -> str | None:
+def _pluralize(name: str) -> str:
+    return name if name.endswith("s") else name + "s"
+
+
+def resolve_path_param(
+    api_url: str,
+    param_name: str,
+    operations: list[dict[str, Any]],
+    attempts: list[dict[str, Any]] | None = None,
+) -> str | None:
     """Find a concrete value for `param_name` by calling a GET list endpoint that returns items containing it.
-    Search response JSON recursively for the first list of dicts that has `param_name` as a key."""
-    # Find GET endpoints with no required path params (list endpoints)
-    candidates = [
-        op for op in operations
-        if op["method"] == "GET" and not any(p["in"] == "path" and p["required"] for p in op["params"])
-    ]
-    for op in candidates:
-        url = api_url.rstrip("/") + op["path"]
+    Searches each response's JSON recursively for the first list of dicts that has `param_name` as a key
+    (so `{"items":[{"sku":...}]}` resolves). Also probes the same-name pluralised endpoint as a fallback.
+    Each probe is appended to `attempts` (url, http_status, found) so callers can surface why resolution failed."""
+    if attempts is None:
+        attempts = []
+    # GET endpoints with no required path params (list endpoints), most specific path first.
+    candidate_urls: list[str] = []
+    for op in sorted(operations, key=lambda o: len(o["path"]), reverse=True):
+        if op["method"] != "GET":
+            continue
+        if any(p["in"] == "path" and p.get("required") for p in op.get("params", [])):
+            continue
+        u = api_url.rstrip("/") + op["path"]
+        if u not in candidate_urls:
+            candidate_urls.append(u)
+    # Pluralised same-name endpoint fallback (e.g. productId -> /products), even if not in the contract.
+    for extra in (_pluralize(param_name), param_name):
+        u = api_url.rstrip("/") + "/" + extra
+        if u not in candidate_urls:
+            candidate_urls.append(u)
+
+    for url in candidate_urls:
         try:
             status, body = _http_get(url)
-            if status != 200:
-                continue
-            val = _find_first_in_list(body, param_name)
-            if val is not None:
-                return str(val)
-        except Exception:
+        except Exception as e:
+            attempts.append({"url": url, "error": str(e)[:200], "found": False})
             continue
+        val = _find_first_in_list(body, param_name) if status == 200 else None
+        attempts.append({"url": url, "http_status": status, "found": val is not None})
+        if val is not None:
+            return str(val)
     return None
 
 
@@ -193,7 +217,15 @@ def run_api_smoke_tests(
 
     # Resolve path params cache
     param_cache: dict[str, str | None] = {}
+    param_attempts: dict[str, list[dict[str, Any]]] = {}
     _all_ops = list(operations.values())
+
+    def _resolve(pname: str) -> str | None:
+        if pname not in param_cache:
+            attempts: list[dict[str, Any]] = []
+            param_cache[pname] = resolve_path_param(api_url, pname, _all_ops, attempts)
+            param_attempts[pname] = attempts
+        return param_cache[pname]
 
     for entry in plan["api_smoke"]:
         if entry["operationId"] == "getHealth":
@@ -204,18 +236,25 @@ def run_api_smoke_tests(
 
         # Build URL by resolving path params
         resolved = True
+        unresolved_param = None
         for pp in path_params:
             pname = pp["name"]
-            if pname not in param_cache:
-                param_cache[pname] = resolve_path_param(api_url, pname, _all_ops)
-            val = param_cache[pname]
+            val = _resolve(pname)
             if val is None:
                 resolved = False
+                unresolved_param = pname
                 break
             path = path.replace("{" + pname + "}", val)
 
         if not resolved:
-            results.append({"id": entry["id"], "kind": "api_smoke", "status": "skipped"})
+            # Couldn't seed a concrete value — surface the resolver's probes so the failure is diagnosable.
+            results.append({
+                "id": entry["id"], "kind": "api_smoke", "status": "skipped",
+                "evidence": {
+                    "error": f"could not resolve path param {{{unresolved_param}}} from any list endpoint",
+                    "resolver_attempts": param_attempts.get(unresolved_param, []),
+                },
+            })
             continue
 
         url = api_url.rstrip("/") + path
@@ -246,9 +285,7 @@ def run_api_smoke_tests(
         resolved = True
         for pp in path_params:
             pname = pp["name"]
-            if pname not in param_cache:
-                param_cache[pname] = resolve_path_param(api_url, pname, _all_ops)
-            val = param_cache[pname]
+            val = _resolve(pname)
             if val is None:
                 resolved = False
                 break
@@ -285,15 +322,54 @@ def run_api_smoke_tests(
 # Playwright spec generator
 # ---------------------------------------------------------------------------
 
+ARTIFACTS_DIR = "/opt/poc-test/artifacts"
+
+
 def generate_js_spec(plan: dict[str, Any], base_url: str) -> str:
-    """Generate a single Playwright spec file for all journeys in the plan."""
+    """Generate a single Playwright spec file — one test per journey.
+
+    Generic traversal driven only by the spec's testids: load the SPA root, then walk it the way
+    the golden frontend is wired — the top nav is `[data-testid^="nav-"]` links, and a detail page is
+    reached by clicking the first `<a>` inside an element whose data-testid ends with `-item`
+    (e.g. /categories -> a `us-02-product-item` link -> /products/:sku). Data loads via fetch, so we
+    wait for network idle and for at least one testid after every navigation before collecting.
+    Each journey then asserts every one of its declared testids was seen somewhere in the walk."""
     lines = [
         "// AUTO-GENERATED by test-agent — do not edit",
         "const { test, expect } = require('@playwright/test');",
         f"const BASE_URL = process.env.BASE_URL || {json.dumps(base_url)};",
         "",
-        "async function collectTestids(page) {",
-        "  return page.$$eval('[data-testid]', els => els.map(e => e.getAttribute('data-testid')));",
+        "async function settle(page) {",
+        "  await page.waitForLoadState('networkidle', {timeout: 15000}).catch(() => {});",
+        "  await page.waitForSelector('[data-testid]', {timeout: 15000}).catch(() => {});",
+        "}",
+        "async function collect(page, seen) {",
+        "  const ids = await page.$$eval('[data-testid]', els => els.map(e => e.getAttribute('data-testid')));",
+        "  ids.forEach(t => seen.add(t));",
+        "}",
+        "async function visitFirstDetail(page, seen) {",
+        "  const detail = await page.$('[data-testid$=\"-item\"] a');",
+        "  if (!detail) return;",
+        "  try { await detail.click(); } catch (e) { return; }",
+        "  await settle(page);",
+        "  await collect(page, seen);",
+        "  await page.goBack().catch(() => {});",
+        "  await settle(page);",
+        "}",
+        "async function traverse(page, seen) {",
+        "  await page.goto(BASE_URL);",
+        "  await settle(page);",
+        "  await collect(page, seen);",
+        "  await visitFirstDetail(page, seen);",  # landing page (/categories) -> product page
+        "  const navCount = (await page.$$('[data-testid^=\"nav-\"]')).length;",
+        "  for (let i = 0; i < navCount; i++) {",
+        "    const links = await page.$$('[data-testid^=\"nav-\"]');",
+        "    if (i >= links.length) break;",
+        "    try { await links[i].click(); } catch (e) { continue; }",
+        "    await settle(page);",
+        "    await collect(page, seen);",
+        "    await visitFirstDetail(page, seen);",
+        "  }",
         "}",
         "",
     ]
@@ -301,8 +377,7 @@ def generate_js_spec(plan: dict[str, Any], base_url: str) -> str:
     for journey in plan.get("journeys", []):
         jid = journey["id"]
         title = journey.get("title", jid)
-        testids = journey.get("testids", [])
-        testids_json = json.dumps(testids)
+        testids_json = json.dumps(journey.get("testids", []))
 
         lines += [
             f"test({json.dumps(title + ' (' + jid + ')')}, async ({{ page }}) => {{",
@@ -312,29 +387,14 @@ def generate_js_spec(plan: dict[str, Any], base_url: str) -> str:
             "  page.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });",
             "  page.on('response', resp => { if (resp.status() >= 400) failedRequests.push({url: resp.url(), status: resp.status()}); });",
             "",
-            "  await page.goto(BASE_URL);",
-            "  (await collectTestids(page)).forEach(t => seen.add(t));",
-            "",
-            "  const navLinks = await page.$$('[data-testid^=\"nav-\"]');",
-            "  for (const link of navLinks) {",
-            "    try { await link.click(); } catch(e) {}",
-            "    await page.waitForLoadState('networkidle', {timeout: 10000}).catch(() => {});",
-            "    (await collectTestids(page)).forEach(t => seen.add(t));",
-            "    const detailLinks = await page.$$('[data-testid$=\"-item\"] a');",
-            "    for (const dl of detailLinks.slice(0, 1)) {",
-            "      try { await dl.click(); } catch(e) {}",
-            "      await page.waitForLoadState('networkidle', {timeout: 10000}).catch(() => {});",
-            "      (await collectTestids(page)).forEach(t => seen.add(t));",
-            "      await page.goBack();",
-            "      await page.waitForLoadState('networkidle', {timeout: 5000}).catch(() => {});",
-            "    }",
-            "  }",
+            "  await traverse(page, seen);",
             "",
             f"  const expected = {testids_json};",
             "  const missing = expected.filter(tid => !seen.has(tid));",
             "  if (missing.length > 0) {",
-            f"    await page.screenshot({{path: '/opt/poc-test/artifacts/{jid}.png', fullPage: true}}).catch(() => {{}});",
-            "    throw new Error('Missing testids: ' + missing.join(', '));",
+            f"    await page.screenshot({{path: {json.dumps(ARTIFACTS_DIR + '/' + jid + '.png')}, fullPage: true}}).catch(() => {{}});",
+            "    const payload = {missing, seen: [...seen], url: page.url(), consoleErrors, failedRequests};",
+            "    throw new Error('MISSING_TESTIDS ' + JSON.stringify(payload));",
             "  }",
             "});",
             "",
@@ -348,9 +408,9 @@ def generate_playwright_config() -> str:
 const { defineConfig } = require('@playwright/test');
 module.exports = defineConfig({
   testDir: '.',
-  timeout: 60000,
+  timeout: 90000,
   reporter: [['json', { outputFile: '/opt/poc-test/report.json' }]],
-  use: { video: 'off', trace: 'off' },
+  use: { video: 'off', trace: 'off', screenshot: 'only-on-failure' },
 });
 """
 
@@ -388,63 +448,83 @@ def run_browser_tests(
     pw_config = generate_playwright_config()
     pkg_json = json.dumps({"private": True, "devDependencies": {"@playwright/test": "1.47.2"}}, indent=2)
 
-    # Build SSM commands
-    escaped_spec = js_spec.replace("'", "'\"'\"'")
-    escaped_config = pw_config.replace("'", "'\"'\"'")
-    escaped_pkg = pkg_json.replace("'", "'\"'\"'")
+    report_key = f"pocs/{poc_id}/test/{run_id}/artifacts/playwright-report.json"
 
-    setup_cmds = [
-        "mkdir -p /opt/poc-test/artifacts",
-        # Write package.json only if missing
-        "[ -f /opt/poc-test/package.json ] || cat > /opt/poc-test/package.json <<'PKGJSON'\n" + pkg_json + "\nPKGJSON",
-        "cd /opt/poc-test",
-        # Install deps
-        "(npm ci 2>/dev/null || npm install) --prefix /opt/poc-test",
-        # Install chromium only if not already present
-        "[ -d ~/.cache/ms-playwright ] || (cd /opt/poc-test && npx playwright install --with-deps chromium)",
-        # Write spec and config
+    # Chromium system libraries for Amazon Linux 2023 (dnf). `playwright install --with-deps` only
+    # knows apt-get, so on AL2023 it fails ("apt-get: command not found"); we install these explicitly
+    # and then download just the browser binary with a bare `playwright install chromium`.
+    al2023_deps = (
+        "nss nspr atk at-spi2-atk at-spi2-core cups-libs libdrm libXcomposite libXdamage "
+        "libXext libXfixes libXrandr libgbm mesa-libgbm libxcb libxkbcommon pango cairo "
+        "alsa-lib gtk3 dbus-libs"
+    )
+
+    all_cmds = [
+        # Playwright's browser cache: pin it under the workdir so it does not depend on $HOME (empty under SSM).
+        "export PLAYWRIGHT_BROWSERS_PATH=/opt/poc-test/ms-playwright",
+        "mkdir -p /opt/poc-test/artifacts && cd /opt/poc-test",
+        "cat > /opt/poc-test/package.json <<'PKGJSON'\n" + pkg_json + "\nPKGJSON",
         "cat > /opt/poc-test/journeys.spec.js <<'SPECEOF'\n" + js_spec + "\nSPECEOF",
         "cat > /opt/poc-test/playwright.config.js <<'CFGEOF'\n" + pw_config + "\nCFGEOF",
+        # npm deps (idempotent; log kept off the capped stdout).
+        "if [ ! -d node_modules/@playwright ]; then npm install >/opt/poc-test/npm.log 2>&1 "
+        "&& echo NPM_INSTALLED || { echo NPM_FAILED; tail -15 /opt/poc-test/npm.log; }; else echo NPM_CACHED; fi",
+        # Chromium system libraries (dnf, idempotent).
+        f"dnf install -y {al2023_deps} >/opt/poc-test/dnf.log 2>&1 && echo DEPS_OK "
+        "|| { echo DEPS_PARTIAL; grep -iE 'no match|error' /opt/poc-test/dnf.log | head -5; }",
+        # Chromium browser binary (bare install; cached under PLAYWRIGHT_BROWSERS_PATH).
+        "if ls /opt/poc-test/ms-playwright/chromium-*/chrome-linux/chrome >/dev/null 2>&1; then echo CHROMIUM_CACHED; "
+        "else npx playwright install chromium >/opt/poc-test/pw.log 2>&1 "
+        "&& echo CHROMIUM_INSTALLED || { echo CHROMIUM_FAILED; tail -20 /opt/poc-test/pw.log; }; fi",
+        # Run the journeys against the deployed public URL (hostname, never IP literal).
+        "echo '--- RUN ---'",
+        f"BASE_URL={base_url} npx playwright test journeys.spec.js "
+        "--config=/opt/poc-test/playwright.config.js 2>&1 | tail -30 || true",
+        # Upload the report + any failure screenshots for the FailureReport (instance role now allows test/*).
+        f"aws s3 cp /opt/poc-test/report.json s3://{bucket}/{report_key} --region ap-south-1 "
+        "&& echo REPORT_UPLOADED || echo REPORT_UPLOAD_FAILED",
+        f"aws s3 cp /opt/poc-test/artifacts s3://{bucket}/pocs/{poc_id}/test/{run_id}/artifacts/ "
+        "--recursive --region ap-south-1 2>/dev/null || true",
+        "echo REPORT_EXISTS=$(test -f /opt/poc-test/report.json && echo yes || echo no)",
     ]
 
-    run_cmds = [
-        "cd /opt/poc-test",
-        f"BASE_URL={base_url} npx playwright test journeys.spec.js --config=/opt/poc-test/playwright.config.js --reporter=json 2>&1 || true",
-        # Upload artifacts
-        f"aws s3 cp /opt/poc-test/artifacts s3://{bucket}/pocs/{poc_id}/test/{run_id}/artifacts/ --recursive --region ap-south-1 2>/dev/null || true",
-        f"aws s3 cp /opt/poc-test/report.json s3://{bucket}/pocs/{poc_id}/test/{run_id}/artifacts/playwright-report.json --region ap-south-1 2>/dev/null || true",
-        # Print report for parsing
-        "echo '=====REPORT====='",
-        "cat /opt/poc-test/report.json 2>/dev/null || echo '{}'",
-    ]
-
-    all_cmds = setup_cmds + run_cmds
-
+    # First run installs npm + chromium (3-5 min); subsequent runs are cached. run_script polls to
+    # timeout_s + 120s, comfortably inside the agent's 15-minute budget.
     r = ssm.run_script(
         instance_id, poc_id, run_id, "playwright_run",
         all_cmds,
         env={},
-        timeout_s=900,
+        timeout_s=600,
         workdir="/opt/poc-test",
     )
 
-    # Parse playwright report from stdout (after marker)
-    stdout = r.get("stdout", "")
-    pw_report: dict[str, Any] = {}
-    if "=====REPORT=====" in stdout:
-        after = stdout.split("=====REPORT=====", 1)[1].strip()
-        try:
-            pw_report = json.loads(after)
-        except json.JSONDecodeError:
-            # Truncated — try to read from S3
-            try:
-                from poc_shared_tools import s3 as s3t
-                s3_key = f"pocs/{poc_id}/test/{run_id}/artifacts/playwright-report.json"
-                pw_report = json.loads(s3t.get_text(s3_key))
-            except Exception:
-                pw_report = {}
-
+    pw_report = _fetch_pw_report(instance_id, poc_id, run_id, report_key)
     return _map_playwright_results(pw_report, journeys, poc_id, run_id)
+
+
+def _fetch_pw_report(instance_id: str, poc_id: str, run_id: str, report_key: str) -> dict[str, Any]:
+    """Read the Playwright JSON report. Primary source is S3 (uploaded by the instance role); if that
+    is missing we re-fetch it over a clean SSM stdout (no install noise to blow the 24 000-char cap)."""
+    from poc_shared_tools import s3 as s3t
+    try:
+        return json.loads(s3t.get_text(report_key))
+    except Exception:
+        pass
+    # Fallback: cat the report on its own so install logs don't crowd it out of the capped stdout.
+    try:
+        from poc_infra_tools import ssm
+        r = ssm.run_script(
+            instance_id, poc_id, run_id, "playwright_report",
+            ["echo '=====REPORT====='", "cat /opt/poc-test/report.json 2>/dev/null || echo '{}'"],
+            timeout_s=120,
+        )
+        stdout = r.get("stdout", "")
+        if "=====REPORT=====" in stdout:
+            after = stdout.split("=====REPORT=====", 1)[1].strip()
+            return json.loads(after)
+    except Exception:
+        pass
+    return {}
 
 
 def _map_playwright_results(
@@ -486,22 +566,39 @@ def _map_playwright_results(
         }
 
         if not passed:
-            evidence: dict[str, Any] = {"error": errors[0] if errors else "test failed"}
-            # Check for 5xx failed requests → backend component
-            failed_reqs = []
-            suspected = "frontend"
-            if failed_reqs and any(fr.get("status", 0) >= 500 for fr in failed_reqs):
-                suspected = "backend"
+            raw_error = errors[0] if errors else "test failed"
+            payload = _parse_missing_payload(raw_error)
+            failed_reqs = payload.get("failedRequests", []) if payload else []
+            console_errors = payload.get("consoleErrors", []) if payload else []
+            # A 5xx seen during the journey points at the backend, otherwise it is the frontend.
+            suspected = "backend" if any(fr.get("status", 0) >= 500 for fr in failed_reqs) else "frontend"
+            evidence: dict[str, Any] = {"error": raw_error[:500]}
+            if payload and payload.get("missing"):
+                evidence["error"] = "missing testids: " + ", ".join(payload["missing"])
+            if console_errors:
+                evidence["console_errors"] = [str(c)[:300] for c in console_errors]
             evidence["failed_requests"] = failed_reqs
             result["suspected_component"] = suspected
             result["evidence"] = evidence
-            # Screenshot artifact
-            screenshot_key = f"pocs/{poc_id}/test/{run_id}/artifacts/{jid}.png"
-            result["artifacts"] = {"screenshot": screenshot_key}
+            # Screenshot artifact (only produced on failure; uploaded to S3 alongside the report).
+            result["artifacts"] = {"screenshot": f"pocs/{poc_id}/test/{run_id}/artifacts/{jid}.png"}
 
         results.append(result)
 
     return results
+
+
+def _parse_missing_payload(error_message: str) -> dict[str, Any]:
+    """Extract the JSON diagnostics the spec throws as `MISSING_TESTIDS {...}` (single line, no newlines)."""
+    marker = "MISSING_TESTIDS "
+    if marker not in error_message:
+        return {}
+    after = error_message.split(marker, 1)[1].splitlines()[0].strip()
+    try:
+        obj = json.loads(after)
+        return obj if isinstance(obj, dict) else {}
+    except json.JSONDecodeError:
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +654,9 @@ def assemble_report(
         cr: dict[str, Any] = {"id": r["id"], "kind": r["kind"], "status": r["status"]}
         if "duration_ms" in r:
             cr["duration_ms"] = r["duration_ms"]
-        if r["status"] == "failed":
+        # Failed results MUST carry attribution + evidence (schema); skipped keep evidence when present
+        # (e.g. the resolver's probe attempts) so an unresolvable path param is diagnosable.
+        if r["status"] in ("failed", "skipped"):
             if "suspected_component" in r:
                 cr["suspected_component"] = r["suspected_component"]
             if "evidence" in r:

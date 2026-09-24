@@ -204,6 +204,7 @@ def test_write_report(run_id: str) -> str:
     Returns result dict (design decision 4) or {"error": {...}}."""
     from poc_shared_tools import metadata as md, s3 as s3t
     from agent_test_agent.pipeline import assemble_report
+    t0 = time.perf_counter()
     try:
         run = md.get_run(run_id)
         poc_id = run["poc_id"]
@@ -242,6 +243,8 @@ def test_write_report(run_id: str) -> str:
             "report_key": report_key,
         }
 
+        # Record the step before finishing the run so the terminal status is not reset to "running".
+        md.update_run_step(run_id, "write_report", "succeeded", duration_ms=int((time.perf_counter() - t0) * 1000))
         md.finish_run(run_id, "succeeded", outputs=result)
         poc_status = "tested" if s["failed"] == 0 else "deployed"
         md.update_poc_status(poc_id, poc_status)
@@ -305,6 +308,19 @@ def build_agent() -> CompiledStateGraph:
                 pass
         return reply(state, Envelope.failed(task_id, code, message))
 
+    def step(run_id: str | None, name: str, status: str, t0: float | None = None) -> None:
+        """Mirror the pipeline onto runs.steps (like the Deploy Agent), best-effort."""
+        if not run_id:
+            return
+        try:
+            from poc_shared_tools import metadata as md
+            kw: dict[str, Any] = {}
+            if t0 is not None:
+                kw["duration_ms"] = int((time.time() - t0) * 1000)
+            md.update_run_step(run_id, name, status, **kw)
+        except Exception:
+            pass
+
     # --- nodes ---
 
     def parse_node(state: TestAgentState) -> dict[str, Any]:
@@ -322,9 +338,11 @@ def build_agent() -> CompiledStateGraph:
         if _timed_out(state):
             return _fail(state, "TIMEOUT", "exceeded 15-minute time limit at start")
         req = state["request"]
+        t0 = time.time()
         r = call("test_start_run", envelope_json=json.dumps({"request": req}))
         if "error" in r:
             return reply(state, Envelope.failed(req["task_id"], r["error"]["code"], r["error"]["message"]))
+        step(r["run_id"], "start", "succeeded", t0)
         return {"run_id": r["run_id"], "poc_id": r["poc_id"], "scope": r["scope"]}
 
     def load_node(state: TestAgentState) -> dict[str, Any]:
@@ -332,10 +350,15 @@ def build_agent() -> CompiledStateGraph:
             return {}
         if _timed_out(state):
             return _fail(state, "TIMEOUT", "exceeded 15-minute time limit at load")
-        r = call("test_load_context", run_id=state["run_id"])
+        run_id = state["run_id"]
+        t0 = time.time()
+        step(run_id, "load_context", "running")
+        r = call("test_load_context", run_id=run_id)
         if "error" in r:
+            step(run_id, "load_context", "failed", t0)
             req = state["request"]
             return reply(state, Envelope.failed(req["task_id"], r["error"]["code"], r["error"]["message"]))
+        step(run_id, "load_context", "succeeded", t0)
         return {}
 
     def plan_node(state: TestAgentState) -> dict[str, Any]:
@@ -343,10 +366,15 @@ def build_agent() -> CompiledStateGraph:
             return {}
         if _timed_out(state):
             return _fail(state, "TIMEOUT", "exceeded 15-minute time limit at plan")
-        r = call("test_generate_plan", run_id=state["run_id"])
+        run_id = state["run_id"]
+        t0 = time.time()
+        step(run_id, "generate_plan", "running")
+        r = call("test_generate_plan", run_id=run_id)
         if "error" in r:
+            step(run_id, "generate_plan", "failed", t0)
             req = state["request"]
             return reply(state, Envelope.failed(req["task_id"], r["error"]["code"], r["error"]["message"]))
+        step(run_id, "generate_plan", "succeeded", t0)
         return {}
 
     def smoke_node(state: TestAgentState) -> dict[str, Any]:
@@ -354,10 +382,15 @@ def build_agent() -> CompiledStateGraph:
             return {}
         if _timed_out(state):
             return _fail(state, "TIMEOUT", "exceeded 15-minute time limit at smoke")
-        r = call("test_run_api_smoke", run_id=state["run_id"])
+        run_id = state["run_id"]
+        t0 = time.time()
+        step(run_id, "api_smoke", "running")
+        r = call("test_run_api_smoke", run_id=run_id)
         if isinstance(r, dict) and "error" in r and not isinstance(r, list):
+            step(run_id, "api_smoke", "failed", t0)
             req = state["request"]
             return reply(state, Envelope.failed(req["task_id"], r["error"]["code"], r["error"]["message"]))
+        step(run_id, "api_smoke", "succeeded", t0)
         return {}
 
     def browser_node(state: TestAgentState) -> dict[str, Any]:
@@ -365,13 +398,19 @@ def build_agent() -> CompiledStateGraph:
             return {}
         if _timed_out(state):
             return _fail(state, "TIMEOUT", "exceeded 15-minute time limit at browser")
+        run_id = state["run_id"]
         scope = state.get("scope", "all")
         if scope == "smoke":
+            step(run_id, "browser", "skipped")
             return {}
-        r = call("test_run_browser", run_id=state["run_id"])
+        t0 = time.time()
+        step(run_id, "browser", "running")
+        r = call("test_run_browser", run_id=run_id)
         if isinstance(r, dict) and "error" in r and not isinstance(r, list):
+            step(run_id, "browser", "failed", t0)
             req = state["request"]
             return reply(state, Envelope.failed(req["task_id"], r["error"]["code"], r["error"]["message"]))
+        step(run_id, "browser", "succeeded", t0)
         return {}
 
     def report_node(state: TestAgentState) -> dict[str, Any]:
@@ -379,10 +418,16 @@ def build_agent() -> CompiledStateGraph:
             return {}
         if _timed_out(state):
             return _fail(state, "TIMEOUT", "exceeded 15-minute time limit at report")
-        r = call("test_write_report", run_id=state["run_id"])
+        run_id = state["run_id"]
+        t0 = time.time()
+        step(run_id, "write_report", "running")
+        r = call("test_write_report", run_id=run_id)
         if "error" in r:
+            step(run_id, "write_report", "failed", t0)
             req = state["request"]
             return reply(state, Envelope.failed(req["task_id"], r["error"]["code"], r["error"]["message"]))
+        # NB: the "write_report" succeeded step is recorded inside the tool *before* finish_run, so it
+        # does not reset the run's terminal status here.
         # Success reply
         req = state["request"]
         report_key = r.get("report_key", "")

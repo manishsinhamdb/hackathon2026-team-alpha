@@ -118,6 +118,94 @@ def test_path_param_resolution():
 
 
 # ---------------------------------------------------------------------------
+# Test 2b — resolver handles the ProductPage shape {"items":[{"sku":...}]}
+# recursively, records its probe attempts, and reports them when unresolved.
+# ---------------------------------------------------------------------------
+
+def test_resolver_finds_sku_in_items_and_records_attempts():
+    fm, contract = _load_golden()
+    operations = pipeline.parse_operations(contract)
+
+    # The listProducts shape from the contract: sku is nested under a top-level "items" list.
+    body = {"items": [{"sku": "SKU-100001", "name": "Poha", "category": "Staples",
+                       "brand": "X", "price_inr": 60}], "next_cursor": None}
+    with patch.object(pipeline, "_http_get", return_value=(200, body)):
+        attempts: list = []
+        val = pipeline.resolve_path_param("http://x/api", "sku", operations, attempts)
+    assert val == "SKU-100001", val
+    assert attempts and attempts[0]["found"] is True
+
+    # Nothing contains the key -> None, and every probe is recorded for the failure evidence.
+    with patch.object(pipeline, "_http_get", return_value=(200, {"items": [{"name": "n"}]})):
+        attempts2: list = []
+        val2 = pipeline.resolve_path_param("http://x/api", "sku", operations, attempts2)
+    assert val2 is None
+    assert len(attempts2) >= 1 and all(a["found"] is False for a in attempts2)
+
+
+# ---------------------------------------------------------------------------
+# Test 2c — api smoke substitutes resolved path params (no literal {sku})
+# ---------------------------------------------------------------------------
+
+class _GoldenShapeHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _json(self, obj):
+        b = json.dumps(obj).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b)
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        prod = {"sku": "SKU-1", "name": "Poha", "category": "Staples", "brand": "X", "price_inr": 60}
+        if path == "/api/health":
+            self._json({"status": "ok", "db": "connected"})
+        elif path == "/api/categories":
+            self._json({"items": [{"name": "Staples", "count": 3}]})
+        elif path == "/api/products":
+            self._json({"items": [prod], "next_cursor": None})
+        elif path == "/api/products/SKU-1":
+            self._json(prod)
+        elif path == "/api/products/SKU-1/recommendations":
+            self._json({"sku": "SKU-1", "items": [dict(prod, orders_together=4)]})
+        elif path == "/api/dashboard/top-products":
+            self._json({"days": 30, "items": [dict(prod, units=9)]})
+        else:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": {"code": "NOT_FOUND",
+                                                    "message": f"unknown {path}"}}).encode())
+
+
+def test_api_smoke_substitutes_path_params():
+    server = HTTPServer(("127.0.0.1", 0), _GoldenShapeHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        fm, contract = _load_golden()
+        operations = pipeline.parse_operations(contract)
+        plan = pipeline.generate_plan(fm["user_stories"], fm["success_criteria"], operations)
+        api_url = f"http://127.0.0.1:{port}/api"
+        health_url = f"{api_url}/health"
+        results = pipeline.run_api_smoke_tests(api_url, health_url, plan)
+    finally:
+        server.shutdown()
+        t.join(timeout=2)
+
+    by_id = {r["id"]: r for r in results}
+    # The two {sku} endpoints must be resolved and pass (regression: literal {sku} -> 404).
+    for rid in ("api-getProduct", "api-getRecommendations"):
+        assert by_id[rid]["status"] == "passed", by_id[rid]
+    assert all("{sku}" not in str(r.get("evidence", "")) for r in results)
+    # sc-01 p95 measured on getRecommendations.
+    assert by_id["api-getRecommendations"].get("measured", {}).get("p95_ms") is not None
+
+
+# ---------------------------------------------------------------------------
 # Test 3 — journeys.spec.js has one test per story and every declared testid
 # ---------------------------------------------------------------------------
 
@@ -138,6 +226,32 @@ def test_generated_spec_js():
 
     # Sanity: @playwright/test is required
     assert "@playwright/test" in js
+
+
+# ---------------------------------------------------------------------------
+# Test 3b — generated journeys match the golden frontend's routes/selectors
+# ---------------------------------------------------------------------------
+
+def test_generated_spec_matches_golden_frontend():
+    fm, contract = _load_golden()
+    operations = pipeline.parse_operations(contract)
+    plan = pipeline.generate_plan(fm["user_stories"], fm["success_criteria"], operations)
+    js = pipeline.generate_js_spec(plan, "http://example.com")
+
+    # Navigation is via the golden nav links and detail pages via the first <a> under a *-item element
+    # (e.g. /categories -> us-02-product-item link -> /products/:sku). Data loads async, so we settle.
+    assert '[data-testid^="nav-"]' in js
+    assert '[data-testid$="-item"] a' in js
+    assert "await page.goto(BASE_URL)" in js
+    assert "networkidle" in js
+    assert "MISSING_TESTIDS" in js  # diagnosable failure payload
+
+    # us-01 lives on /products/:sku, only reachable by following a detail link — its testids must
+    # still be asserted (the traversal is what makes them reachable).
+    for tid in ["us-01-product-name", "us-01-reco-list", "us-01-reco-item"]:
+        assert tid in js
+    # One test() per story.
+    assert js.count("async ({ page }) =>") == 3
 
 
 # ---------------------------------------------------------------------------

@@ -92,7 +92,7 @@ def run_step(run: dict[str, Any], step: str) -> dict[str, Any]:
                             "test -f /etc/poc/bootstrap.done", "node --version", "nginx -v"], timeout_s=400)
         if r["exit_code"] != 0:
             return _err("BOOTSTRAP_FAILED", r["stderr"] or r["stdout"], log_key=r.get("log_key"))
-        return _ok(instance_id=inst["instance_id"], public_ip=inst["public_ip"], instance_type=inst["instance_type"])
+        return _ok(instance_id=inst["instance_id"], public_ip=inst["public_ip"], public_dns=inst.get("public_dns") or inst["public_ip"], instance_type=inst["instance_type"])
 
     if step == "fetch_bundle":
         bucket, key = cfg.s3_bucket, o["bundle_key"]

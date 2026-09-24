@@ -188,7 +188,7 @@ def finish_run(run_id: str, status: str, outputs: dict[str, Any] | None = None, 
     if status not in ("succeeded", "failed", "cancelled"):
         raise ToolError("BAD_STATUS", "finish_run status must be succeeded|failed|cancelled")
     upd: dict[str, Any] = {"status": status, "ended_at": now(), "updated_at": now()}
-    if outputs: upd["outputs"] = outputs
+    if outputs: upd.update({f"outputs.{k}": v for k, v in outputs.items()})  # merge, never replace step outputs
     if error: upd["error"] = error
     r = _db().runs.find_one_and_update({"run_id": run_id}, {"$set": upd}, return_document=ReturnDocument.AFTER)
     if not r:

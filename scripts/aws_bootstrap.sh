@@ -48,7 +48,7 @@ aws iam put-role-policy --role-name "$ROLE_NAME" --policy-name poc-instance-scop
 {"Version":"2012-10-17","Statement":[
  {"Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::$BUCKET/pocs/*"},
  {"Effect":"Allow","Action":["s3:ListBucket"],"Resource":"arn:aws:s3:::$BUCKET","Condition":{"StringLike":{"s3:prefix":["pocs/*"]}}},
- {"Effect":"Allow","Action":["s3:PutObject"],"Resource":"arn:aws:s3:::$BUCKET/pocs/*/deploy/*"},
+ {"Effect":"Allow","Action":["s3:PutObject"],"Resource":["arn:aws:s3:::$BUCKET/pocs/*/deploy/*","arn:aws:s3:::$BUCKET/pocs/*/test/*"]},
  {"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":"arn:aws:secretsmanager:$REGION:$ACCOUNT_ID:secret:$SECRET_PREFIX/*"},
  {"Effect":"Allow","Action":["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],"Resource":"arn:aws:logs:$REGION:$ACCOUNT_ID:log-group:/poc-builder/*"}
 ]}
