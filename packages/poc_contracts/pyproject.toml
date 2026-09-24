@@ -1,6 +1,6 @@
 [project]
 name = "poc-contracts"
-version = "0.1.0"
+version = "0.1.1"
 description = "Frozen cross-agent contracts (JSON schemas, AgentEnvelope, IDs, fakes) for POC Builder"
 requires-python = ">=3.11"
 dependencies = ["jsonschema>=4.20"]

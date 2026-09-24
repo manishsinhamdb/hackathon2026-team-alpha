@@ -84,7 +84,9 @@
           "type": "string",
           "enum": [
             "shared_db",
-            "flex_cluster"
+            "flex_cluster",
+            "local_ec2",
+            "external_uri"
           ]
         },
         "cluster_name": {

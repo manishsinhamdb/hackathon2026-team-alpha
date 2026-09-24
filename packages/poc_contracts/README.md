@@ -52,3 +52,7 @@ except ContractError as e:
     # e.errors is [(json_path, message)] — feed it back to the LLM and retry once
     ...
 ```
+
+## Changelog
+- **0.1.1** — `deployment.database.mode` gains `local_ec2` (MongoDB Community installed on the POC instance) and `external_uri` (user-supplied connection string; never provisioned or dropped by the platform).
+- **0.1.0** — initial freeze.

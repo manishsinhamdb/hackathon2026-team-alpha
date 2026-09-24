@@ -9,7 +9,7 @@ from .ids import new_id, next_version, is_id
 from .validate import validate, ContractError, KINDS, schema_for
 from .envelope import Envelope
 
-CONTRACT_VERSION = "0.1.0"
+CONTRACT_VERSION = "0.1.1"
 
 __all__ = ["validate", "ContractError", "KINDS", "schema_for", "Envelope",
            "new_id", "next_version", "is_id", "CONTRACT_VERSION"]
