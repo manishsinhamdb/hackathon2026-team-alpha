@@ -82,10 +82,32 @@ A new session should be able to continue from this file. Last updated during the
   ../../scripts/gen_golden_check.py`.
 - `/invoke` curl pattern with an AgentEnvelope as the message + polling snippets: see below / `docs/07`.
 
+## Overnight run outcome (see docs/07 for the full narrative)
+
+- **chat-agent** implemented (§6.1 ReAct front door) and **proven live**: through the chat agent only,
+  transcript → spec v001 (chat→draft A2A) → `spec_approved` gate → code run v004 (`code_ready`,
+  chat→orchestrator→3 coders A2A) → `code_approved` (implicit) gate. All gates recorded before their runs.
+- **reaper** added (`scripts/reaper.py`, §5.7) with a fake-ledger unit test.
+- Four real integration bugs found by running the full `agentic dev up --all` stack and fixed with tests:
+  chat `durable_workflow: false` (nondeterminism); A2A `_unwrap_envelope` (OE wraps the reply as
+  `{"result":"<envelope json>",...}`); frontend backfills a missing FRONTEND_README.md; draft drops a
+  malformed optional `aggregation_sketch`. Every invoke must pass `user_id`.
+- **BLOCKER (deploy):** Atlas Admin API rejects the machine egress IP `104.30.164.1` (403
+  `IP_ADDRESS_NOT_ON_ACCESS_LIST`). Deploy fails at `provision_db`; the Atlas half of teardown fails too.
+  Fix = add that IP to the Atlas service-account key's API Access List (needs an Atlas admin), then re-run.
+- **Golden teardown:** EC2 `i-01d8121191e7999a4` terminated + secret deleted (AWS ok). Two non-billable
+  Atlas entries remain (blocked); clear them by re-running teardown once the IP is allowlisted.
+
 ## Remaining plan
 
-chat-agent (done overnight — verify); root `agentic dev up --all` happy path
-(`fixtures/conversation_happy_path.json`); reaper; `agentic init` / secrets (incl. AWS keys) / atlas
-setup / data-plane IPs; build+deploy leaf-first (seed, api, frontend → orchestrator; test → deploy;
-draft → chat) and fill `allowed_callers`; end-to-end on the platform; tear down the golden instance.
+1. **Allowlist the egress IP on the Atlas API access list** (unblocks all Atlas ops), then re-run the
+   deploy turn through chat (or `resume_run` the failed deploy run) → deployed → tested → torn_down; and
+   re-run the golden teardown to clear its last 2 Atlas entries.
+2. Platform deployment (leaf-first): `agentic init` from the root; set secrets (names only:
+   `LLM_API_KEY`, `VOYAGE_API_KEY`, `A2A_JWT_SECRET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+   `ATLAS_CLIENT_ID`, `ATLAS_CLIENT_SECRET`, `POC_PLATFORM_MONGODB_URI`); atlas setup + data-plane IPs;
+   `agentic build`/`deploy` seed, api, frontend → orchestrator; test → deploy; draft → chat; fill each
+   callee's `allowed_callers` with the caller workspace IDs (§4.1 table in docs/02).
+3. Create the Atlas Vector Search index `spec_vector_idx` on `poc_builder.spec_embeddings`
+   (docs/atlas-vector-index.json) for Draft-Agent RAG.
 </content>
