@@ -1,0 +1,25 @@
+Meeting: POC kickoff — "Kirana Basket" product recommendations
+Date: 22 September 2026
+Attendees: Priya (Head of Product, Kirana Basket), Arjun (Engineering lead), Manish (MongoDB SA)
+
+Priya: We run an online grocery marketplace for tier-2 cities in Karnataka and Tamil Nadu. About 12,000 SKUs, roughly 40,000 orders a month. The problem is our product page is dead — you land on a packet of atta and there's nothing else to buy. We want "customers also bought" recommendations on every product page.
+
+Arjun: Today the catalogue is in Postgres and orders in a separate MySQL. Joining them for co-purchase is a nightly batch that takes four hours, and by the time it runs the data is stale. We want to see whether MongoDB can serve co-purchase recommendations live from the order history.
+
+Manish: What would you want to see in a proof of concept, concretely?
+
+Priya: Three things. One, a product page that shows at least five "also bought" items for any product, and it has to come back fast, under 300 milliseconds at the 95th percentile with a realistic catalogue. Two, a way to browse products by category with prices, because that's the entry point for most customers. Three, a small dashboard for our category managers showing the top-selling products over the last 30 days, since they'll be the ones judging whether the recommendations make sense.
+
+Arjun: For data, we can give you a sample: products with SKU, name, category, brand, price, and orders with a customer id, date and line items with SKU, quantity and unit price. Don't need real customer data, synthetic is fine, but keep the shape. Say 5,000 products and 8,000 orders is enough to make the latency question meaningful.
+
+Priya: Users are shoppers on mobile web and the category managers on desktop. No login needed for the POC.
+
+Manish: Success criteria then: the recommendation endpoint under 300 ms p95 with that data, at least five recommendations rendering for any product that has order history, and the top-products view matching what an aggregation over the orders says.
+
+Arjun: Agreed. One constraint: we want this on AWS Mumbai region, and we'd like to see it running as a real web app, not a notebook.
+
+Priya: Timeline is loose, two weeks to a demo we can show the founders.
+
+Manish: Out of scope for the POC: personalisation per customer, search, checkout. Just the three flows.
+
+Arjun: Yes. And if it works we'd migrate the catalogue and orders properly afterwards, that's a separate conversation.

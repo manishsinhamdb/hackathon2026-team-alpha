@@ -1,0 +1,31 @@
+{
+  "poc_id": "poc_01K5ZGF1XTVREG0000000000A1",
+  "code_version": "v001",
+  "spec_version": "v001",
+  "stack": {
+    "backend": "node-express",
+    "frontend": "react-vite",
+    "database": "mongodb"
+  },
+  "components": [
+    "seed",
+    "backend",
+    "frontend"
+  ],
+  "contract_key": "pocs/poc_01K5ZGF1XTVREG0000000000A1/code/v001/api_contract.yaml",
+  "bundle_key": "pocs/poc_01K5ZGF1XTVREG0000000000A1/code/v001/bundle.tar.gz",
+  "bundle_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "guardrail_scan": {
+    "ok": true,
+    "scanned_at": "2026-09-24T12:00:00Z",
+    "violations": []
+  },
+  "produced_by": {
+    "run_id": "run_01K5ZGF1XTVREG0000000000A1",
+    "changed_components": [
+      "seed",
+      "backend",
+      "frontend"
+    ]
+  }
+}

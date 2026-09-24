@@ -1,0 +1,8 @@
+{
+  "name": "poc-seed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "seed": "node seed.js" },
+  "dependencies": { "mongodb": "^6.9.0" }
+}

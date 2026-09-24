@@ -1,0 +1,16 @@
+{
+  "description": "Scripted conversation driving the Chat Agent through every gate (§6.1 acceptance). Each turn is what the user says; `expect` is what must be true afterwards.",
+  "poc_title": "Kirana Basket — live \"also bought\" recommendations",
+  "transcript_file": "transcripts/recsys_meeting.txt",
+  "turns": [
+    {"user": "<upload transcripts/recsys_meeting.txt>", "expect": {"poc_status": "drafting", "draft_called": true}},
+    {"user": "Answer q1: 300 ms p95 with 5,000 products and 8,000 orders. Answer q2: product page recommendations, category browsing, top-products dashboard.", "expect": {"poc_status": "spec_ready", "spec_version": "v001"}},
+    {"user": "Show me the spec", "expect": {"assistant_shows": "poc_spec.md v001"}},
+    {"user": "Looks good, go ahead and build it", "expect": {"approval": {"stage": "spec_approved", "version": "v001"}, "run_stage": "code"}},
+    {"user": "How's it going?", "expect": {"assistant_uses": "get_run_status"}},
+    {"user": "<wait for code run>", "expect": {"poc_status": "code_ready", "code_version": "v001"}},
+    {"user": "Deploy it, I don't need to review the code", "expect": {"approval": {"stage": "code_approved", "version": "v001", "implicit": true}, "run_stage": "deploy"}},
+    {"user": "<wait for deploy run>", "expect": {"poc_status": "tested", "test_report_exists": true}},
+    {"user": "Tear it down", "expect": {"poc_status": "torn_down", "active_cloud_resources": 0}}
+  ]
+}

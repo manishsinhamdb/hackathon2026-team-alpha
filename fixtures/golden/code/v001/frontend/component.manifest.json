@@ -1,0 +1,4 @@
+{"component": "frontend", "runtime": "node20", "workdir": "frontend",
+ "entrypoints": {"install": ["npm ci"], "build": ["npm run build"]},
+ "env": {"required": ["VITE_API_BASE_URL"]}, "static_dir": "dist",
+ "publish": {"type": "nginx_static", "api_proxy": {"path": "/api", "upstream": "http://127.0.0.1:8080"}}}

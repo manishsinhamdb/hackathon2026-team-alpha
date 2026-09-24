@@ -1,0 +1,4 @@
+{"rounds": [{"round": 1, "questions": [
+  {"question_id": "q1", "field": "success_criteria", "question": "What latency target and on what data volume?", "answer": "300 ms p95 with 5,000 products and 8,000 orders"},
+  {"question_id": "q2", "field": "scope", "question": "Which flows are in scope?", "answer": "Product page recommendations, category browsing, top-products dashboard"}
+]}]}

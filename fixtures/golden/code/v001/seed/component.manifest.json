@@ -1,0 +1,4 @@
+{"component": "seed", "runtime": "node20", "workdir": "seed",
+ "entrypoints": {"install": ["npm ci --omit=dev"], "seed": ["node seed.js"]},
+ "env": {"required": ["MONGODB_URI", "SEED_MAX_DOCS"]},
+ "expected_output": "json_summary_last_line"}

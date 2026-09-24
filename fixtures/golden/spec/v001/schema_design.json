@@ -1,0 +1,34 @@
+{
+  "database_name": "poc_01K5ZGF1XTVREG0000000000A1",
+  "collections": [
+    {
+      "name": "products",
+      "description": "Catalogue items",
+      "fields": [
+        {"name": "sku", "type": "string", "required": true, "example": "SKU-100001"},
+        {"name": "name", "type": "string", "required": true, "example": "Aashirvaad Atta 5 kg"},
+        {"name": "category", "type": "string", "required": true, "example": "Staples"},
+        {"name": "brand", "type": "string", "required": true, "example": "Aashirvaad"},
+        {"name": "price_inr", "type": "decimal", "required": true, "example": 289},
+        {"name": "created_at", "type": "date", "required": true}
+      ],
+      "indexes": [{"keys": {"sku": 1}, "unique": true}, {"keys": {"category": 1, "name": 1}}],
+      "seed": {"count": 5000, "generator_hints": "Indian grocery brands and products across 12 categories; INR prices 10–2000"}
+    },
+    {
+      "name": "orders",
+      "description": "Customer orders with embedded line items",
+      "fields": [
+        {"name": "order_id", "type": "string", "required": true, "example": "ORD-500001"},
+        {"name": "customer_id", "type": "string", "required": true, "example": "CUST-2041"},
+        {"name": "ordered_at", "type": "date", "required": true},
+        {"name": "items", "type": "array<object>", "required": true, "example": [{"sku": "SKU-100001", "qty": 2, "unit_price_inr": 289}]},
+        {"name": "total_inr", "type": "decimal", "required": true}
+      ],
+      "indexes": [{"keys": {"order_id": 1}, "unique": true}, {"keys": {"items.sku": 1, "ordered_at": -1}}, {"keys": {"ordered_at": -1}}],
+      "relationships": [{"field": "items.sku", "references": "products.sku", "embed_or_reference": "reference"}],
+      "seed": {"count": 8000, "generator_hints": "2–8 items per order, last 120 days, co-purchase clusters so recommendations are non-trivial"}
+    }
+  ],
+  "seed_requirements": {"max_docs_per_collection": 10000, "deterministic_seed": 42}
+}

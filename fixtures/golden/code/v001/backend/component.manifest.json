@@ -1,0 +1,4 @@
+{"component": "backend", "runtime": "node20", "workdir": "backend",
+ "entrypoints": {"install": ["npm ci"], "build": ["npm run build"], "start": ["node dist/server.js"],
+                 "healthcheck": {"type": "http", "url": "http://localhost:8080/api/health", "expect": 200}},
+ "env": {"required": ["MONGODB_URI", "PORT"], "optional": []}, "ports": [8080]}

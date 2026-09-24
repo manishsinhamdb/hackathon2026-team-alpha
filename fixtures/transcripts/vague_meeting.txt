@@ -1,0 +1,8 @@
+Meeting: intro call with Ravi (founder)
+Date: 21 September 2026
+
+Ravi: We're building something in the logistics space and we think MongoDB might fit. We have lots of data coming in from drivers and want to do something smart with it, maybe dashboards, maybe alerts. Can you build us a quick POC?
+
+Manish: What data, and what decision would the POC need to support?
+
+Ravi: Mostly location pings and delivery status. We'll figure out the details later, we just want to see it working. Something we can show investors next month would be ideal.

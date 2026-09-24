@@ -1,0 +1,172 @@
+openapi: 3.1.0
+info:
+  title: Kirana Basket recommendations POC API
+  version: 1.0.0
+  x-poc-id: poc_01K5ZGF1XTVREG0000000000A1
+  x-spec-version: v001
+servers:
+  - url: /api
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      x-user-story-ids: []
+      responses:
+        "200":
+          description: Service and database are reachable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: Database not connected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /categories:
+    get:
+      operationId: listCategories
+      x-user-story-ids: [us-02]
+      responses:
+        "200":
+          description: Distinct categories with product counts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Category" }
+  /products:
+    get:
+      operationId: listProducts
+      x-user-story-ids: [us-02]
+      parameters:
+        - { name: category, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: cursor, in: query, required: false, schema: { type: string }, description: Opaque cursor from a previous page }
+      responses:
+        "200":
+          description: Products, sorted by name
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProductPage" }
+  /products/{sku}:
+    get:
+      operationId: getProduct
+      x-user-story-ids: [us-01]
+      parameters:
+        - { name: sku, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: One product
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Product" }
+        "404":
+          description: Unknown SKU
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /products/{sku}/recommendations:
+    get:
+      operationId: getRecommendations
+      x-user-story-ids: [us-01]
+      parameters:
+        - { name: sku, in: path, required: true, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 20, default: 10 } }
+      responses:
+        "200":
+          description: Products bought together with this SKU in the last 90 days, most frequent first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sku, items]
+                properties:
+                  sku: { type: string }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Recommendation" }
+        "404":
+          description: Unknown SKU
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /dashboard/top-products:
+    get:
+      operationId: getTopProducts
+      x-user-story-ids: [us-03]
+      parameters:
+        - { name: days, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 365, default: 30 } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 50, default: 10 } }
+      responses:
+        "200":
+          description: Top products by units sold in the window
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [days, items]
+                properties:
+                  days: { type: integer }
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/TopProduct" }
+components:
+  schemas:
+    Health:
+      type: object
+      required: [status, db]
+      properties:
+        status: { type: string, enum: [ok] }
+        db: { type: string, enum: [connected] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+    Category:
+      type: object
+      required: [name, count]
+      properties:
+        name: { type: string }
+        count: { type: integer }
+    Product:
+      description: Maps to schema_design.json collection `products`
+      type: object
+      required: [sku, name, category, brand, price_inr]
+      properties:
+        sku: { type: string }
+        name: { type: string }
+        category: { type: string }
+        brand: { type: string }
+        price_inr: { type: number }
+    ProductPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Product" }
+        next_cursor: { type: [string, "null"] }
+    Recommendation:
+      allOf:
+        - $ref: "#/components/schemas/Product"
+        - type: object
+          required: [orders_together]
+          properties:
+            orders_together: { type: integer, description: Number of orders containing both SKUs }
+    TopProduct:
+      allOf:
+        - $ref: "#/components/schemas/Product"
+        - type: object
+          required: [units]
+          properties:
+            units: { type: integer }

@@ -1,0 +1,48 @@
+{
+  "patterns": [
+    {
+      "id": "qp-01", "user_story_ids": ["us-01"], "name": "Also-bought recommendations for a SKU",
+      "description": "Products that co-occur with the given SKU in orders from the last 90 days, ranked by number of orders",
+      "collections": ["orders", "products"],
+      "pseudocode": "match orders with items.sku = X and ordered_at >= now-90d → unwind items → match items.sku != X → group by items.sku count → sort count desc → limit 10 → lookup products by sku",
+      "aggregation_sketch": [
+        {"$match": {"items.sku": "<sku>", "ordered_at": {"$gte": "<now-90d>"}}},
+        {"$unwind": "$items"},
+        {"$match": {"items.sku": {"$ne": "<sku>"}}},
+        {"$group": {"_id": "$items.sku", "orders": {"$sum": 1}}},
+        {"$sort": {"orders": -1, "_id": 1}},
+        {"$limit": 10},
+        {"$lookup": {"from": "products", "localField": "_id", "foreignField": "sku", "as": "product"}},
+        {"$unwind": "$product"}
+      ],
+      "expected_latency_ms_p95": 300,
+      "supporting_indexes": [{"collection": "orders", "keys": {"items.sku": 1, "ordered_at": -1}}]
+    },
+    {
+      "id": "qp-02", "user_story_ids": ["us-02"], "name": "Products by category",
+      "description": "All products in a category sorted by name, paginated",
+      "collections": ["products"],
+      "pseudocode": "find category = C → sort name → limit/cursor",
+      "aggregation_sketch": [{"$match": {"category": "<category>"}}, {"$sort": {"name": 1}}, {"$limit": 50}],
+      "expected_latency_ms_p95": 100,
+      "supporting_indexes": [{"collection": "products", "keys": {"category": 1, "name": 1}}]
+    },
+    {
+      "id": "qp-03", "user_story_ids": ["us-03"], "name": "Top products last 30 days",
+      "description": "Top 10 products by units sold in the last 30 days",
+      "collections": ["orders", "products"],
+      "pseudocode": "match ordered_at >= now-30d → unwind items → group by sku sum qty → sort desc → limit 10 → lookup products",
+      "aggregation_sketch": [
+        {"$match": {"ordered_at": {"$gte": "<now-30d>"}}},
+        {"$unwind": "$items"},
+        {"$group": {"_id": "$items.sku", "units": {"$sum": "$items.qty"}}},
+        {"$sort": {"units": -1, "_id": 1}},
+        {"$limit": 10},
+        {"$lookup": {"from": "products", "localField": "_id", "foreignField": "sku", "as": "product"}},
+        {"$unwind": "$product"}
+      ],
+      "expected_latency_ms_p95": 300,
+      "supporting_indexes": [{"collection": "orders", "keys": {"ordered_at": -1}}]
+    }
+  ]
+}
