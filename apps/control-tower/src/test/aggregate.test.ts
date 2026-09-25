@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  aggregatePoc, toPocSummary,
+  aggregatePoc, filterCounts, matchesFilter, selectPocs, summarizeToday, toPocSummary,
   type RawPoc, type RawResource, type RawRun, type RawTask,
 } from "@/lib/aggregate";
+import type { PocSummary } from "@/lib/types";
 
 const NOW = Date.parse("2026-09-25T17:00:00Z");
 
@@ -19,7 +20,8 @@ describe("toPocSummary", () => {
       current_versions: { spec: "v003" }, created_at: "a", updated_at: "b",
     };
     expect(toPocSummary(p)).toEqual({
-      poc_id: "poc_1", title: "T", status: "spec_ready", versions: { spec: "v003", code: undefined }, updated_at: "b",
+      poc_id: "poc_1", title: "T", status: "spec_ready", versions: { spec: "v003", code: undefined },
+      created_at: "a", updated_at: "b", ui_archived: false,
     });
   });
 });
@@ -192,5 +194,104 @@ describe("aggregatePoc — a running run shows live elapsed", () => {
     const detail = aggregatePoc(poc, [], [], resources, NOW);
     expect(detail.cloudResources.activeCount).toBe(1);
     expect(detail.cloudResources.items[0].resource_id).toBe("i-1");
+  });
+});
+
+describe("aggregatePoc — Code run coder rows", () => {
+  const poc: RawPoc = { poc_id: "poc_c", title: "C", status: "coding", owner_user_id: "u", approvals: [], created_at: "a", updated_at: "b" };
+  const runs: RawRun[] = [
+    { run_id: "run_code", poc_id: "poc_c", stage: "code", status: "running", started_at: "2026-09-25T16:57:00Z" },
+  ];
+  const tasks: RawTask[] = [
+    { task_id: "t1", run_id: "run_code", seq: 1, agent: "api_agent", tool: "generate_api", mode: "contract", status: "succeeded", duration_ms: 38_000 },
+    { task_id: "t2", run_id: "run_code", seq: 2, agent: "data_seeding_agent", tool: "generate_seed", mode: "seed", status: "succeeded", duration_ms: 82_000 },
+    { task_id: "t3", run_id: "run_code", seq: 3, agent: "api_agent", tool: "generate_api", mode: "backend", status: "running" },
+  ];
+
+  it("maps tasks onto contract/seed/backend/frontend/assemble in order", () => {
+    const detail = aggregatePoc(poc, runs, tasks, [], NOW);
+    expect(detail.coders.map((c) => c.key)).toEqual(["contract", "seed", "backend", "frontend", "assemble"]);
+    const byKey = Object.fromEntries(detail.coders.map((c) => [c.key, c.status]));
+    expect(byKey.contract).toBe("done");
+    expect(byKey.seed).toBe("done");
+    expect(byKey.backend).toBe("running");
+    expect(byKey.frontend).toBe("queued");
+    expect(byKey.assemble).toBe("queued");
+  });
+
+  it("has no coder rows when there is no code run", () => {
+    const detail = aggregatePoc(poc, [], [], [], NOW);
+    expect(detail.coders).toEqual([]);
+  });
+});
+
+describe("aggregatePoc — run history display status", () => {
+  const poc: RawPoc = { poc_id: "poc_h", title: "H", status: "drafting", owner_user_id: "u", approvals: [], created_at: "a", updated_at: "b" };
+  const runs: RawRun[] = [
+    { run_id: "run_ok", poc_id: "poc_h", stage: "draft", status: "succeeded", started_at: "2026-09-25T16:00:00Z", ended_at: "2026-09-25T16:05:00Z", outputs: { spec_version: "v003" } },
+    { run_id: "run_q", poc_id: "poc_h", stage: "draft", status: "succeeded", started_at: "2026-09-25T15:50:00Z", ended_at: "2026-09-25T15:54:00Z", outputs: { needs_clarification: true } },
+    { run_id: "run_run", poc_id: "poc_h", stage: "code", status: "running", started_at: "2026-09-25T16:10:00Z" },
+  ];
+  it("folds a draft-with-questions into a QUESTIONS row and keeps others", () => {
+    const detail = aggregatePoc(poc, runs, [], [], NOW);
+    const byId = Object.fromEntries(detail.runHistory.map((r) => [r.run_id, r.display]));
+    expect(byId.run_ok).toBe("succeeded");
+    expect(byId.run_q).toBe("questions");
+    expect(byId.run_run).toBe("running");
+    // newest first
+    expect(detail.runHistory[0].run_id).toBe("run_run");
+  });
+});
+
+describe("summarizeToday", () => {
+  const NOW_TODAY = Date.parse("2026-09-25T22:00:00Z");
+  const pocs: RawPoc[] = [
+    { poc_id: "p1", title: "a", status: "tested", owner_user_id: "u", created_at: "2026-09-25T18:00:00Z", updated_at: "b" },
+    { poc_id: "p2", title: "b", status: "drafting", owner_user_id: "u", created_at: "2026-09-25T20:00:00Z", updated_at: "b" },
+    { poc_id: "p3", title: "c", status: "torn_down", owner_user_id: "u", created_at: "2026-09-24T10:00:00Z", updated_at: "b" }, // yesterday
+  ];
+  const runs: RawRun[] = [
+    { run_id: "r1", poc_id: "p1", stage: "test", status: "succeeded", started_at: "2026-09-25T18:40:00Z", ended_at: "2026-09-25T18:44:00Z" },
+  ];
+  it("counts drafted-today, deployed&tested-today, live resources, and the transcript->tested duration", () => {
+    const t = summarizeToday(pocs, runs, 0, NOW_TODAY);
+    expect(t.drafted).toBe(2); // p1 + p2 created today; p3 yesterday
+    expect(t.deployedTested).toBe(1); // p1 tested today
+    expect(t.cloudLive).toBe(0);
+    expect(t.transcriptToTestedMs).toBe(Date.parse("2026-09-25T18:44:00Z") - Date.parse("2026-09-25T18:00:00Z")); // 44 min
+  });
+});
+
+describe("library filters + sort", () => {
+  const mk = (over: Partial<PocSummary>): PocSummary => ({
+    poc_id: "p", title: "T", status: "spec_ready", versions: {}, created_at: "2026-09-25T10:00:00Z", updated_at: "b", ...over,
+  });
+  const pocs: PocSummary[] = [
+    mk({ poc_id: "p_new", title: "DailyDabba", status: "coding", created_at: "2026-09-25T20:00:00Z" }),
+    mk({ poc_id: "p_old", title: "Kirana", status: "tested", created_at: "2026-09-25T09:00:00Z" }),
+    mk({ poc_id: "p_torn", title: "Old torn", status: "torn_down", created_at: "2026-09-25T08:00:00Z" }),
+    mk({ poc_id: "p_arch", title: "Hidden", status: "spec_ready", created_at: "2026-09-25T21:00:00Z", ui_archived: true }),
+  ];
+
+  it("counts each filter", () => {
+    const c = filterCounts(pocs);
+    expect(c.active).toBe(2); // coding + tested (not archived, not terminal)
+    expect(c.deployed).toBe(1); // tested
+    expect(c.torn_down).toBe(1);
+    expect(c.archived).toBe(1);
+  });
+
+  it("archived POCs never appear in a non-archived filter", () => {
+    expect(matchesFilter(pocs[3], "active")).toBe(false);
+    expect(matchesFilter(pocs[3], "archived")).toBe(true);
+  });
+
+  it("selectPocs filters + searches + sorts newest first", () => {
+    const active = selectPocs(pocs, "active", "");
+    expect(active.map((p) => p.poc_id)).toEqual(["p_new", "p_old"]); // created desc
+    const searched = selectPocs(pocs, "active", "kirana");
+    expect(searched.map((p) => p.poc_id)).toEqual(["p_old"]);
+    const archived = selectPocs(pocs, "archived", "");
+    expect(archived.map((p) => p.poc_id)).toEqual(["p_arch"]);
   });
 });
