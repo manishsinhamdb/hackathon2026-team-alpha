@@ -98,6 +98,67 @@ A new session should be able to continue from this file. Last updated during the
 - **Golden teardown:** EC2 `i-01d8121191e7999a4` terminated + secret deleted (AWS ok). Two non-billable
   Atlas entries remain (blocked); clear them by re-running teardown once the IP is allowlisted.
 
+## Root-stack invoke mechanics (`agentic dev up --all`)
+
+The local UI proxies `/invoke` to the OE and injects the per-workspace scope from `AGENTIC_WORKSPACES_JSON`
+(orgId / **projectId `550725d3a4fb9b891ad1bdcd`** / workspaceId). A plain `POST /invoke` with no workspace
+returns `{"error":"project_id does not match orchestration engine scope"}` — you MUST scope it.
+
+- **Port:** the UI is published on a random localhost port; read it from `docker ps` — the row
+  `15_hackathon2026-all-ui-1  127.0.0.1:<PORT>->3000/tcp`. It changes across `dev up` runs (was `52983`
+  this session). App containers are `15_hackathon2026-all-app-<agent>-1`; the platform DB + S3 live on the
+  Atlas POV cluster (each app process sources `/app/.env` at runtime — `POC_PLATFORM_MONGODB_URI` there wins
+  over the compose `MONGODB_URI`, which points at the throwaway local `mongodb` container).
+- **Scope:** add `?workspace=<agent>` (e.g. `chat-agent`); the proxy fills in the matching project/workspace.
+- **Body:** `{"message": "<plain English>", "session_id": "<stable id>", "user_id": "<id>"}`. `session_id`
+  reuse is what makes a multi-turn conversation cohere — the SDK derives the LangGraph `thread_id` as
+  `session_id:workspace_id`, so reuse the same `session_id` across turns of one conversation and pick a fresh
+  one to start over. `user_id` is mandatory (durable-memory identity; the chat agent also stamps approvals
+  with it). Response: `{"result":"<agent reply text>","session_id":..,"user_id":..,"execution_id":..,"status":"completed"}`.
+- **Curl:**
+  ```bash
+  PORT=$(docker ps --format '{{.Names}} {{.Ports}}' | sed -n 's/.*ui-1 127.0.0.1:\([0-9]*\)->3000.*/\1/p')
+  curl -s -X POST "http://127.0.0.1:$PORT/invoke?workspace=chat-agent" -H 'content-type: application/json' \
+    -d '{"message":"How is it going?","session_id":"e2e3","user_id":"u_local"}'
+  ```
+- **Turn latency:** the chat agent is a ReAct loop, so a turn is several LLM round-trips (gateway latency
+  dominates: ~30–70 s each). Stage-start tools no longer block for the whole stage (see below), but a turn
+  can still run a couple of minutes if the LLM takes several tool steps — poll from the CLI with a long
+  `curl -m`, or fire the turn and watch the `runs` document directly.
+
+### Fixes made during the live end-to-end run (2026-09-25)
+The Atlas API allowlist unblocked deploy; driving the happy path through chat then surfaced five real bugs,
+each fixed with a test:
+- **Chat replies fast after starting a stage** (ergonomics). `chat_start_*`/`chat_teardown` used to wait on
+  the A2A call up to the 300 s ceiling (the SDK's `invoke_a2a_agent` has no timeout and blocks until the
+  callee graph returns), so a long turn came back as Bad Gateway / empty to the UI while the run carried on
+  unseen. The specialists are durable (`durable_workflow: true`) and persist their `runs` document at graph
+  start, so `_a2a_run` now runs the A2A call on a **context-copied daemon thread**
+  (`contextvars.copy_context()` — without it the SDK call silently fails to leave the process), waits only a
+  short ack (`A2A_ACK_TIMEOUT_S`), then watches for the freshly registered run doc (`_await_new_run`),
+  returns `{"status":"started","run_id":…}`, and tells the user to ask "how's it going?". Verified live:
+  a teardown turn returned in ~22 s with a new run_id while the teardown ran in the background.
+- **A failed deploy releases the POC status.** `deploy_start_run` flips `pocs.status` to `deploying`;
+  previously a failed run left it stuck there (blocking a fresh deploy — exactly the overnight state).
+  `deploy_finish_run` now resets `pocs.status` back to `code_ready` when a **deploy-stage** run finishes
+  `failed` (teardown finishes via `metadata.finish_run` directly, so it is unaffected). Test:
+  `test_failed_deploy_resets_poc_status`.
+- **Deploy found the Test Agent / Orchestrator by internal name, not skill.** `tests_node`/`repair_node`
+  called `find_agent("test_agent")` / `find_agent("coding_orchestrator")`, but A2A discovery exposes the
+  **skill** name; the lookup failed with `no A2A agent matching 'test_agent'`. Now `find_agent("e2e-tests")`
+  / `find_agent("code-orchestration")` (matching how the Chat Agent resolves them). The fake-SDK tests now
+  key handlers by skill name so they mirror real discovery.
+- **Frontend repair choked on trailing prose.** `parse_output` did a plain `json.loads`, which failed with
+  `Extra data: line 1 column N` when the model appended notes/REPAIR_NOTES after the JSON object; the repair
+  code run failed and the deploy exhausted its repair budget. It now decodes the first complete JSON value
+  with `json.JSONDecoder().raw_decode` (tolerating leading and trailing prose). Test:
+  `test_parse_output_tolerates_trailing_and_leading_prose`.
+- **Deploy URLs used the raw IP, not the public DNS.** `publish_frontend` built the app/api/health URLs from
+  `public_ip`; the golden deployment uses the EC2 **public DNS** name (and the egress proxy refuses raw-IP
+  hosts). Now it uses `public_dns` (falling back to the IP only if none is assigned). Test:
+  `test_publish_frontend_urls_use_public_dns`. NB: the delivered e2e run was deployed just before this fix so
+  its recorded URLs are IP-based; the fix applies to subsequent deploys.
+
 ## Remaining plan
 
 1. **Allowlist the egress IP on the Atlas API access list** (unblocks all Atlas ops), then re-run the
@@ -110,4 +171,3 @@ A new session should be able to continue from this file. Last updated during the
    callee's `allowed_callers` with the caller workspace IDs (§4.1 table in docs/02).
 3. Create the Atlas Vector Search index `spec_vector_idx` on `poc_builder.spec_embeddings`
    (docs/atlas-vector-index.json) for Draft-Agent RAG.
-</content>
