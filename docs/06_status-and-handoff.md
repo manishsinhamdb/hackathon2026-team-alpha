@@ -580,3 +580,18 @@ created** (draft only; no code/deploy/teardown ran):
 Both draft runs completed cleanly as root sessions with `draft_finalize` succeeding — the exact step the old
 A2A path destroyed. Every chat turn fast-acked in <60 s; only the background poll turns (multi-step ReAct)
 took longer, and `--stream` carried them without a 504.
+
+## Control Tower — web UI (2026-09-26)
+
+`apps/control-tower` is a Next.js (App Router, TS) web UI: a **BFF** whose server routes hold the SA secret /
+DB URI / platform token (never the browser). Left pane chats with the deployed chat-agent; right pane is a
+live pipeline board that polls `GET /api/pocs/:id` every 10 s (read-only on the platform DB, shapes from
+`metadata.py`/`poc_contracts`) and never sends chat turns. Chat goes over `/invokeStream` (SSE) so a rich
+spec summary that exceeds the ~60 s synchronous cap still returns; 504/timeouts degrade to "still replying,
+poll". Runs as a single non-root `node:20-alpine` container (`/healthz`, `PORT`-driven, config via env) —
+Kanopy-ready. New project SA **`control-tower`** (AGENT_DEVELOPER); pair only in
+`apps/control-tower/.env.local` (gitignored). 31 unit tests (token cache + SSE + aggregation). **Proven in a
+real browser on http://localhost:3100** driving `poc_01M3CHJMABWPXT6XP182RHSCEK` (spec_ready v003): board
+shows draft run `run_01M3CN9ANTM0D1CCBYZR1E0BDX` succeeded + Code not started; "Show me the spec" rendered the
+full v003 summary; "How's it going?" kept the board consistent via polling, no refresh. No code/deploy/
+teardown run → no AWS/Atlas resources. Full detail: `docs/09_control-tower.md`.
