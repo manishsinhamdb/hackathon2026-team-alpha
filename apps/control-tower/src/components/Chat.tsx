@@ -1,12 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  FileText, Hammer, HelpCircle, MessageSquare, Paperclip, RotateCcw, Rocket, Send, Trash2,
-} from "lucide-react";
+import Link from "next/link";
+import { Paperclip, Send } from "lucide-react";
 import type { ConversationMessage } from "@/lib/types";
 import { useToast } from "./Toasts";
-import MessageBubble, { TypingBubble } from "./MessageBubble";
+import MessageBubble, { ReplyingPill } from "./MessageBubble";
 
 interface LiveMessage {
   role: "user" | "assistant" | "system";
@@ -16,23 +15,27 @@ interface LiveMessage {
 
 // Compact action chips. `label` is what the transcript shows; `message` is the canned text actually sent
 // to the chat agent — unchanged from the original wiring so behaviour is identical.
-const ACTIONS: { label: string; message: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { label: "Show me the spec", message: "Show me the spec", icon: FileText },
-  { label: "Build it", message: "Looks good, go ahead and build it", icon: Hammer },
-  { label: "Deploy (4h TTL)", message: "Deploy it, I don't need to review the code (4-hour TTL)", icon: Rocket },
-  { label: "How's it going?", message: "How's it going?", icon: HelpCircle },
-  { label: "Tear it down", message: "Tear it down", icon: Trash2 },
-  { label: "Retry", message: "Retry", icon: RotateCcw },
+const ACTIONS: { label: string; message: string }[] = [
+  { label: "Show me the spec", message: "Show me the spec" },
+  { label: "Build it", message: "Looks good, go ahead and build it" },
+  { label: "Deploy · 4h TTL", message: "Deploy it, I don't need to review the code (4-hour TTL)" },
+  { label: "How's it going?", message: "How's it going?" },
+  { label: "Tear it down", message: "Tear it down" },
+  { label: "Retry", message: "Retry" },
 ];
 
 export default function Chat({
   sessionId,
+  sessionCount,
   pocId,
   onSent,
+  onNewSession,
 }: {
   sessionId: string;
+  sessionCount: number;
   pocId: string;
   onSent: () => void;
+  onNewSession: () => void;
 }) {
   const [messages, setMessages] = useState<LiveMessage[]>([]);
   const [recovered, setRecovered] = useState<ConversationMessage[]>([]);
@@ -73,7 +76,7 @@ export default function Chat({
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, recovered, busy]);
+  }, [messages, recovered, busy, showRecovered]);
 
   const send = useCallback(
     async (text: string, display?: string) => {
@@ -102,16 +105,15 @@ export default function Chat({
         toast.error(`Chat failed: ${msg}`);
       } finally {
         setBusy(false);
-        onSent(); // nudge the board to refresh right away
+        onSent(); // nudge the board to refresh right away + bump the session turn count
       }
     },
     [sessionId, busy, onSent, toast],
   );
 
   // Canned actions operate on the SELECTED POC. The chat agent resolves the POC from natural language, so
-  // we append the poc_id to the message (a fresh browser session otherwise has no POC in context). The
-  // transcript still shows the friendly button label. Free-typed messages are sent verbatim (they may be a
-  // transcript that starts a NEW POC, where scoping would be wrong).
+  // we append the poc_id to the message. The transcript still shows the friendly label. Free-typed messages
+  // are sent verbatim (they may be a transcript that starts a NEW POC, where scoping would be wrong).
   const sendAction = (label: string, message: string) => {
     const scoped = pocId ? `${message}\n\n(This is about POC ${pocId}.)` : message;
     send(scoped, label);
@@ -127,7 +129,6 @@ export default function Chat({
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter sends; Shift+Enter (or ⌘/Ctrl+Enter) inserts a newline.
     if (e.key === "Enter" && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       send(input);
@@ -137,86 +138,83 @@ export default function Chat({
   const canSend = !!sessionId && !busy;
 
   return (
-    <section className="flex h-full min-h-0 flex-col bg-canvas">
+    <section className="flex h-full min-h-0 flex-col border-r border-line bg-ink">
       {/* Header */}
-      <div className="flex items-center gap-2 border-b border-line bg-surface px-4 py-2.5">
-        <MessageSquare className="h-4 w-4 text-accent" />
-        <span className="text-sm font-semibold">Chat</span>
-        {recovered.length > 0 && (
-          <button
-            onClick={() => setShowRecovered((v) => !v)}
-            className="ml-auto rounded-md px-2 py-0.5 text-xs text-muted transition-colors hover:bg-surface-2 hover:text-content"
-          >
-            {showRecovered ? "Hide" : "Show"} {recovered.length} recovered
-          </button>
-        )}
+      <div className="flex h-[52px] shrink-0 items-center gap-3 border-b border-line px-5">
+        <div className="font-sora text-sm font-semibold">Conversation</div>
+        <span className="font-mono text-xs text-faint">session {sessionId || "…"}</span>
+        <span className="flex-1" />
+        <Link href="/library" className="text-xs font-semibold text-content hover:text-green">
+          Sessions ({sessionCount})
+        </Link>
+        <button onClick={onNewSession} className="text-xs font-semibold text-content hover:text-green">
+          New session
+        </button>
       </div>
 
       {/* Log */}
-      <div ref={logRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+      <div ref={logRef} className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-5">
+        {recovered.length > 0 && (
+          <button
+            onClick={() => setShowRecovered((v) => !v)}
+            className="self-center rounded-full border border-line px-3 py-1 text-xs text-faint hover:text-content"
+          >
+            {showRecovered ? "Hide" : "Show"} {recovered.length} earlier {recovered.length === 1 ? "message" : "messages"}
+          </button>
+        )}
         {showRecovered &&
           recovered.map((m, i) => (
-            <MessageBubble
-              key={`r-${i}`}
-              role={m.role === "user" ? "user" : "assistant"}
-              content={m.content}
-              recovered
-            />
+            <MessageBubble key={`r-${i}`} role={m.role === "user" ? "user" : "assistant"} content={m.content} recovered />
           ))}
 
-        {messages.length === 0 && (recovered.length === 0 || !showRecovered) ? (
-          <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-            <MessageSquare className="h-8 w-8 text-idle" />
-            <p className="text-sm font-medium text-muted">Start a conversation</p>
-            <p className="max-w-xs text-xs text-faint">
-              Paste a meeting transcript to draft a new POC, or pick one above and use a quick action below.
-            </p>
+        {messages.length === 0 && (recovered.length === 0 || !showRecovered) && (
+          <div className="m-auto max-w-xs text-center text-sm text-faint">
+            Paste a meeting transcript to draft a new POC, or pick one above and use a quick action below.
           </div>
-        ) : null}
+        )}
 
         {messages.map((m, i) => (
           <MessageBubble key={i} role={m.role} content={m.content} at={m.at} />
         ))}
-        {busy && <TypingBubble />}
+        {busy && <ReplyingPill />}
       </div>
 
-      {/* Composer (sticky) */}
-      <div className="border-t border-line bg-surface px-3 pb-3 pt-2.5">
-        <div className="mb-2 flex flex-wrap gap-1.5">
-          {ACTIONS.map(({ label, message, icon: Icon }) => (
+      {/* Composer */}
+      <div className="flex shrink-0 flex-col gap-2.5 border-t border-line px-5 pb-[18px] pt-3.5">
+        <div className="flex flex-wrap gap-2">
+          {ACTIONS.map(({ label, message }) => (
             <button
               key={label}
               disabled={!canSend}
               onClick={() => sendAction(label, message)}
-              className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-xs font-medium text-content transition-colors hover:border-green-dark hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+              className="h-[30px] rounded-full border border-line2 bg-surface px-3 text-xs text-content transition-colors hover:border-green hover:text-green disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <Icon className="h-3.5 w-3.5" />
               {label}
             </button>
           ))}
         </div>
-
-        <div className="flex items-end gap-2 rounded-xl border border-line bg-canvas p-2 focus-within:border-green-dark">
+        <div className="flex items-end gap-2.5 rounded-xl border border-line2 bg-surface py-2.5 pl-3.5 pr-2.5 focus-within:border-green">
+          <textarea
+            ref={taRef}
+            value={input}
+            rows={2}
+            aria-label="Message the agent"
+            placeholder="Message the agent, or paste a meeting transcript to start a new POC  ·  Enter to send, Shift+Enter for a new line"
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={onKeyDown}
+            className="max-h-40 flex-1 resize-none bg-transparent text-[13px] text-content outline-none placeholder:text-faint"
+          />
           <label
-            className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-2 hover:text-content"
+            className="flex h-9 w-9 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-line2 text-muted transition-colors hover:text-content"
             title="Attach a .txt transcript"
           >
             <Paperclip className="h-4 w-4" />
             <input ref={fileRef} type="file" accept=".txt,text/plain" className="hidden" onChange={onPickFile} />
           </label>
-          <textarea
-            ref={taRef}
-            value={input}
-            rows={1}
-            placeholder="Message the agent…  (Enter to send · Shift+Enter for a new line)"
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            className="max-h-40 min-h-[36px] flex-1 resize-none bg-transparent py-1.5 text-sm text-content outline-none placeholder:text-faint"
-          />
           <button
             disabled={!canSend || !input.trim()}
             onClick={() => send(input)}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-green-base text-ink transition-colors hover:bg-green-dark hover:text-white disabled:cursor-not-allowed disabled:bg-idle disabled:text-white/70"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-green text-greenInk transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             title="Send"
           >
             <Send className="h-4 w-4" />

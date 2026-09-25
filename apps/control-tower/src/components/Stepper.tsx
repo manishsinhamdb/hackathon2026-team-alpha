@@ -1,9 +1,8 @@
 "use client";
 
-import { Check, Circle, Loader2, ShieldCheck, UserRound, X } from "lucide-react";
+import { Check, X } from "lucide-react";
 import type { StageCell } from "@/lib/types";
-import { fmtDuration } from "@/lib/format";
-import { CopyId } from "./ui";
+import { fmtClock, fmtDuration, initials } from "@/lib/format";
 
 // Elapsed for a running run, final duration once ended; null before it starts.
 function stageDurationMs(s: StageCell, nowMs: number): number | null {
@@ -12,95 +11,107 @@ function stageDurationMs(s: StageCell, nowMs: number): number | null {
   return s.duration_ms ?? null;
 }
 
-// One cell of the vertical stepper. Pure given (stage, nowMs) — render-tested in src/test/stepper.test.tsx.
-export function StageStep({ stage, nowMs, isLast }: { stage: StageCell; nowMs: number; isLast: boolean }) {
+// Static hint shown for a not-started cell (matches the design's quiet secondary line).
+const HINTS: Record<string, string> = {
+  draft: "not started",
+  spec_approved: "gate",
+  code: "coders",
+  code_approved: "gate",
+  deploy: "EC2",
+  test: "e2e",
+  teardown: "resources",
+};
+
+// One cell of the horizontal Draft -> Spec approved -> Code -> Code approved -> Deploy -> Tests -> Torn down
+// stepper. Pure given (stage, nowMs) — state-mapping-tested in src/test/stepper.test.tsx.
+export function StageStep({
+  stage,
+  nowMs,
+  isLast,
+  teardownHint,
+}: {
+  stage: StageCell;
+  nowMs: number;
+  isLast: boolean;
+  teardownHint?: string;
+}) {
   const s = stage;
   const isGate = s.kind === "gate";
   const running = s.status === "running" || s.status === "waiting_user";
   const done = s.status === "succeeded";
   const failed = s.status === "failed";
-  const notStarted = s.status === "not_started";
+  const notStarted = s.status === "not_started" || s.status === "cancelled";
 
-  const ring =
-    done ? "border-ok bg-ok/12 text-ok"
-      : running ? "border-run bg-run/12 text-run"
-      : failed ? "border-fail bg-fail/12 text-fail"
-      : "border-line bg-surface-2 text-idle";
+  // Circle
+  let circle: React.ReactNode;
+  if (done) {
+    circle = (
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-green">
+        <Check className="h-3.5 w-3.5 text-greenInk" strokeWidth={3} />
+      </span>
+    );
+  } else if (running) {
+    circle = <span className="h-7 w-7 shrink-0 rounded-full border-[3px] border-runText bg-run box-border" />;
+  } else if (failed) {
+    circle = (
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-fail">
+        <X className="h-3.5 w-3.5 text-failBg" strokeWidth={3} />
+      </span>
+    );
+  } else {
+    // not started: dashed ring for a gate, solid ring for a run
+    circle = <span className={`h-7 w-7 shrink-0 rounded-full border-2 box-border border-line2 ${isGate ? "border-dashed" : ""}`} />;
+  }
 
-  const icon =
-    done ? (isGate ? <ShieldCheck className="h-4 w-4" /> : <Check className="h-4 w-4" />)
-      : running ? (s.status === "waiting_user" ? <UserRound className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />)
-      : failed ? <X className="h-4 w-4" />
-      : <Circle className="h-3 w-3" />;
+  // Label + detail colours
+  const labelClass = running ? "text-runText" : done || failed ? "text-content" : "text-faint";
 
-  const elapsed = stageDurationMs(s, nowMs);
-
-  // Secondary line describing the state.
-  let detail: React.ReactNode = null;
+  let detail: React.ReactNode;
   if (isGate) {
     detail = done ? (
-      <span className="text-muted">
-        approved {s.approvedVersion ? <span className="font-medium text-content">{s.approvedVersion}</span> : ""} by{" "}
-        <span className="text-content">{s.approvedBy ?? "—"}</span>
+      <span className="text-faint">
+        gate · by {initials(s.approvedBy)} {fmtClock(s.ended_at)}
       </span>
     ) : (
-      <span className="text-faint">awaiting approval</span>
+      <span className="text-dim">gate</span>
     );
-  } else if (notStarted) {
-    detail = <span className="text-faint">Not started</span>;
-  } else {
+  } else if (done) {
     detail = (
-      <span className={failed ? "text-fail" : "text-muted"}>
-        {running ? "Running · " : failed ? "Failed · " : "Done · "}
-        <span className="tabular-nums">{fmtDuration(elapsed)}</span>
-        {!running && s.status !== "not_started" && !failed ? "" : ""}
+      <span className="text-faint tabular-nums">
+        {fmtDuration(s.duration_ms)}
+        {s.version ? ` · ${s.version}` : ""}
       </span>
     );
+  } else if (running) {
+    detail = <span className="text-runText tabular-nums">running · {fmtDuration(stageDurationMs(s, nowMs))}</span>;
+  } else if (failed) {
+    detail = <span className="text-fail">{s.error?.code ? `failed · ${s.error.code}` : "failed"}</span>;
+  } else {
+    detail = <span className="text-dim">{s.key === "teardown" && teardownHint ? teardownHint : HINTS[s.key] ?? "not started"}</span>;
   }
 
   return (
-    <li className="relative flex gap-3 pb-1" data-status={s.status} data-kind={s.kind}>
-      {/* Rail: dot + connector */}
-      <div className="relative flex flex-col items-center">
-        <span
-          className={`z-10 flex h-7 w-7 items-center justify-center rounded-full border-2 bg-surface ${ring} ${running ? "animate-pulse2" : ""}`}
-        >
-          {icon}
-        </span>
-        {!isLast && <span className={`w-px flex-1 ${done ? "bg-ok/40" : "bg-line"}`} style={{ minHeight: 14 }} />}
+    <div
+      data-status={s.status}
+      data-kind={s.kind}
+      className={`flex flex-col items-start gap-2 ${isLast ? "min-w-[96px]" : "flex-1"}`}
+    >
+      <div className="flex w-full items-center gap-2.5">
+        {circle}
+        {!isLast && <span className={`h-0.5 flex-1 ${done ? "bg-green" : "bg-line2"}`} />}
       </div>
-
-      {/* Body */}
-      <div className={`min-w-0 flex-1 pb-4 ${notStarted ? "opacity-60" : ""}`}>
-        <div className="flex items-center gap-2">
-          <span className={`text-sm font-semibold ${notStarted ? "text-muted" : "text-content"}`}>{s.label}</span>
-          <span className="rounded bg-surface-2 px-1.5 py-px text-[10px] font-medium uppercase tracking-wide text-faint">
-            {s.kind}
-          </span>
-        </div>
-        <div className="mt-0.5 text-xs">{detail}</div>
-        {s.run_id && (
-          <div className="mt-1">
-            <CopyId value={s.run_id} />
-          </div>
-        )}
-        {failed && s.error && (
-          <div className="mt-1 rounded-md border border-fail/25 bg-fail/8 px-2 py-1 text-xs text-fail">
-            <span className="font-medium">{s.error.code}</span>
-            {s.error.message ? `: ${s.error.message}` : ""}
-          </div>
-        )}
-      </div>
-    </li>
+      <div className={`text-[13px] font-semibold ${labelClass}`}>{s.label}</div>
+      <div className="text-xs">{detail}</div>
+    </div>
   );
 }
 
-export function Stepper({ stages, nowMs }: { stages: StageCell[]; nowMs: number }) {
+export function Stepper({ stages, nowMs, teardownHint }: { stages: StageCell[]; nowMs: number; teardownHint?: string }) {
   return (
-    <ol className="mt-1">
+    <div className="flex items-start">
       {stages.map((s, i) => (
-        <StageStep key={s.key} stage={s} nowMs={nowMs} isLast={i === stages.length - 1} />
+        <StageStep key={s.key} stage={s} nowMs={nowMs} isLast={i === stages.length - 1} teardownHint={teardownHint} />
       ))}
-    </ol>
+    </div>
   );
 }

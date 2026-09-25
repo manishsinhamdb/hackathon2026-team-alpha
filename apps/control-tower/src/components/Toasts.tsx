@@ -50,7 +50,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           <div
             key={t.id}
             role="alert"
-            className="pointer-events-auto flex animate-toast-in items-start gap-2.5 rounded-lg border border-fail/30 bg-surface px-3.5 py-3 shadow-pop"
+            className="pointer-events-auto flex animate-toast-in items-start gap-2.5 rounded-lg border border-fail/40 bg-surface px-3.5 py-3 shadow-2xl"
           >
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-fail" />
             <div className="min-w-0 flex-1 text-sm text-content">{t.message}</div>

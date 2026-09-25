@@ -1,84 +1,130 @@
 "use client";
 
-import { ChevronDown, PlusCircle, RefreshCw, TowerControl } from "lucide-react";
+import Link from "next/link";
+import { useEffect, useRef, useState } from "react";
+import { ChevronDown, Droplet, Library, Plus, User } from "lucide-react";
 import type { PocSummary } from "@/lib/types";
-import { HealthDot, StatusPill } from "./ui";
+import { fmtDateShort } from "@/lib/format";
+import { HealthChip, StatusPill } from "./ui";
+
+// The product mark: a green rounded square with a droplet glyph (the design's leaf/drop mark).
+function ProductMark() {
+  return (
+    <div className="flex min-w-[200px] items-center gap-3">
+      <div className="flex h-[34px] w-[34px] items-center justify-center rounded-[10px] bg-green">
+        <Droplet className="h-[18px] w-[18px] text-greenInk" fill="currentColor" strokeWidth={0} />
+      </div>
+      <div className="flex flex-col gap-px leading-none">
+        <div className="font-sora text-[15px] font-semibold tracking-tight">POC Builder</div>
+        <div className="text-[11px] uppercase tracking-[0.08em] text-faint">Control Tower</div>
+      </div>
+    </div>
+  );
+}
 
 export default function TopBar({
   pocs,
   selected,
   onSelect,
   onNewPoc,
-  onNewSession,
-  sessionId,
   connection,
+  project,
 }: {
   pocs: PocSummary[];
   selected: string;
   onSelect: (id: string) => void;
   onNewPoc: () => void;
-  onNewSession: () => void;
-  sessionId: string;
   connection: "ok" | "error" | "loading";
+  project: string;
 }) {
   const current = pocs.find((p) => p.poc_id === selected);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [open]);
 
   return (
-    <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-line bg-ink px-4 py-2.5 text-white">
-      <div className="flex items-center gap-2.5">
-        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-green-base/15 text-green-base">
-          <TowerControl className="h-5 w-5" />
-        </span>
-        <div className="leading-tight">
-          <div className="text-sm font-semibold tracking-tight">
-            POC Builder <span className="text-white/40">—</span> Control Tower
-          </div>
-          <div className="text-[11px] text-white/45">Chat + live pipeline</div>
-        </div>
-      </div>
+    <header className="flex h-16 shrink-0 items-center gap-5 border-b border-line bg-ink px-6">
+      <ProductMark />
 
       {/* POC selector */}
-      <div className="flex items-center gap-2">
-        <div className="relative">
-          <select
-            aria-label="Select POC"
-            value={selected}
-            onChange={(e) => onSelect(e.target.value)}
-            className="max-w-[320px] appearance-none truncate rounded-md border border-white/15 bg-white/5 py-1.5 pl-3 pr-8 text-sm text-white outline-none transition-colors hover:border-white/30 focus:border-green-base"
-          >
-            <option value="" className="bg-ink">— select a POC —</option>
+      <div ref={ref} className="relative min-w-0 flex-1" style={{ maxWidth: 640 }}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex h-[42px] w-full items-center gap-3 rounded-[10px] border border-line bg-surface px-3.5 text-left text-content"
+        >
+          <span
+            className={`h-2 w-2 shrink-0 rounded-full ${connection === "error" ? "bg-fail" : connection === "loading" ? "bg-faint" : "bg-run"}`}
+          />
+          {current ? (
+            <>
+              <span className="min-w-0 truncate font-semibold">{current.title}</span>
+              {current.versions.spec && (
+                <span className="shrink-0 font-mono text-xs text-faint">spec {current.versions.spec}</span>
+              )}
+              <StatusPill status={current.status} />
+              <span className="shrink-0 text-xs text-faint">created {fmtDateShort(current.created_at)}</span>
+            </>
+          ) : (
+            <span className="truncate text-faint">Select a POC…</span>
+          )}
+          <span className="flex-1" />
+          <ChevronDown className="h-4 w-4 shrink-0 text-faint" />
+        </button>
+
+        {open && (
+          <div className="absolute left-0 right-0 top-[48px] z-30 max-h-[60vh] overflow-y-auto rounded-xl border border-line bg-surface p-1.5 shadow-2xl">
+            {pocs.length === 0 && <div className="px-3 py-3 text-sm text-faint">No POCs.</div>}
             {pocs.map((p) => (
-              <option key={p.poc_id} value={p.poc_id} className="bg-ink">
-                {p.title}
-                {p.versions.spec ? ` · spec ${p.versions.spec}` : ""}
-              </option>
+              <button
+                key={p.poc_id}
+                onClick={() => {
+                  onSelect(p.poc_id);
+                  setOpen(false);
+                }}
+                className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-elevated ${
+                  p.poc_id === selected ? "bg-elevated" : ""
+                }`}
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">{p.title}</span>
+                  <span className="block truncate font-mono text-[11px] text-faint">{p.poc_id}</span>
+                </span>
+                {p.versions.spec && <span className="shrink-0 font-mono text-[11px] text-faint">spec {p.versions.spec}</span>}
+                <StatusPill status={p.status} />
+              </button>
             ))}
-          </select>
-          <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-white/50" />
-        </div>
-        {current && <StatusPill status={current.status} />}
+          </div>
+        )}
       </div>
 
-      <div className="flex-1" />
-
-      <div className="flex items-center gap-2">
+      {/* Right actions */}
+      <div className="ml-auto flex items-center gap-2.5">
         <button
           onClick={onNewPoc}
-          className="inline-flex items-center gap-1.5 rounded-md bg-green-base px-3 py-1.5 text-sm font-semibold text-ink transition-colors hover:bg-green-dark hover:text-white"
+          className="flex h-10 items-center gap-2 rounded-[10px] bg-green px-4 font-semibold text-greenInk transition-opacity hover:opacity-90"
         >
-          <PlusCircle className="h-4 w-4" /> New POC
+          <Plus className="h-4 w-4" strokeWidth={2.2} /> New POC
         </button>
-        <button
-          onClick={onNewSession}
-          className="inline-flex items-center gap-1.5 rounded-md border border-white/15 px-3 py-1.5 text-sm text-white/90 transition-colors hover:border-white/30 hover:bg-white/5"
+        <Link
+          href="/library"
+          className="flex h-10 items-center gap-2 rounded-[10px] border border-line2 px-3.5 font-medium text-content transition-colors hover:bg-surface"
         >
-          <RefreshCw className="h-3.5 w-3.5" /> New session
-        </button>
-        <div className="ml-1 flex items-center gap-2 border-l border-white/10 pl-3">
-          <HealthDot state={connection} />
-          <span className="hidden font-mono text-[11px] text-white/45 sm:inline" title="Chat session id">
-            {sessionId || "…"}
-          </span>
+          <Library className="h-4 w-4" /> POC library
+        </Link>
+        <HealthChip project={project} state={connection} />
+        <div
+          className="flex h-9 w-9 items-center justify-center rounded-full bg-line2 text-content"
+          title="Signed-in user"
+        >
+          <User className="h-4 w-4" />
         </div>
       </div>
     </header>

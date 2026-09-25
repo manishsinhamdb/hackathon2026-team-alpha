@@ -1,34 +1,29 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { PocSummary } from "@/lib/types";
+import { useSessions } from "@/lib/sessions";
 import Chat from "./Chat";
 import PipelineBoard from "./PipelineBoard";
 import TopBar from "./TopBar";
 import { ToastProvider } from "./Toasts";
 
 const POLL_MS = 10_000;
-
-function newSessionId(): string {
-  const rnd =
-    typeof crypto !== "undefined" && crypto.randomUUID
-      ? crypto.randomUUID().slice(0, 8)
-      : Math.random().toString(36).slice(2, 10);
-  return `ct-${rnd}`;
-}
+const PROJECT = "hackathon2026"; // the deploy-target platform project shown in the health chip
 
 function ControlTowerInner() {
   const [pocs, setPocs] = useState<PocSummary[]>([]);
   const [selected, setSelected] = useState<string>("");
-  const [sessionId, setSessionId] = useState<string>("");
   const [listError, setListError] = useState<string>("");
   const [loaded, setLoaded] = useState(false);
   // Bumped after a chat turn completes so the board fetches immediately instead of waiting for the next tick.
   const [refreshSignal, setRefreshSignal] = useState(0);
+  const { sessions, activeId, newSession, recordTurn } = useSessions();
 
-  // Session id is generated per browser tab, after mount (avoids SSR/hydration mismatch).
+  // Honour ?poc=<id> (e.g. opened from the library) once on mount.
   useEffect(() => {
-    setSessionId(newSessionId());
+    const id = new URLSearchParams(window.location.search).get("poc");
+    if (id) setSelected(id);
   }, []);
 
   const loadPocs = useCallback(async () => {
@@ -48,58 +43,56 @@ function ControlTowerInner() {
   // Poll the POC list on the same 10 s cadence; pause when the tab is hidden.
   useEffect(() => {
     loadPocs();
-    let timer: ReturnType<typeof setInterval> | null = null;
-    const start = () => {
-      if (timer) return;
-      timer = setInterval(() => {
-        if (!document.hidden) loadPocs();
-      }, POLL_MS);
-    };
-    const stop = () => {
-      if (timer) clearInterval(timer);
-      timer = null;
-    };
-    start();
+    const timer = setInterval(() => {
+      if (!document.hidden) loadPocs();
+    }, POLL_MS);
     const onVis = () => {
-      if (document.hidden) return;
-      loadPocs();
+      if (!document.hidden) loadPocs();
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      stop();
+      clearInterval(timer);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [loadPocs]);
 
-  const onNewSession = () => setSessionId(newSessionId());
-  // "New POC": clear the selection and start a fresh session so a pasted transcript starts a brand-new POC
-  // (canned actions scope to a selected POC; free-typed input with none selected is sent verbatim).
+  // The workspace selector hides archived POCs (the library's Archived filter shows them).
+  const selectablePocs = useMemo(() => pocs.filter((p) => !p.ui_archived), [pocs]);
+
   const onNewPoc = () => {
     setSelected("");
-    setSessionId(newSessionId());
+    newSession();
   };
-  const onSent = useCallback(() => setRefreshSignal((n) => n + 1), []);
+  const onSent = useCallback(() => {
+    setRefreshSignal((n) => n + 1);
+    if (activeId) recordTurn(activeId);
+  }, [activeId, recordTurn]);
 
   const connection: "ok" | "error" | "loading" = listError ? "error" : loaded ? "ok" : "loading";
 
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       <TopBar
-        pocs={pocs}
+        pocs={selectablePocs}
         selected={selected}
         onSelect={setSelected}
         onNewPoc={onNewPoc}
-        onNewSession={onNewSession}
-        sessionId={sessionId}
         connection={connection}
+        project={PROJECT}
       />
 
-      {/* Two columns ≥1024px; stacked below. */}
+      {/* Chat (5/12) · Pipeline (7/12); stacked below lg. */}
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <div className="flex h-[55vh] min-h-0 shrink-0 flex-col border-b border-line lg:h-auto lg:w-[42%] lg:min-w-[380px] lg:max-w-[560px] lg:border-b-0 lg:border-r">
-          <Chat sessionId={sessionId} pocId={selected} onSent={onSent} />
+        <div className="flex h-[50vh] min-h-0 shrink-0 flex-col lg:h-auto lg:w-[41.6%] lg:min-w-[420px]">
+          <Chat
+            sessionId={activeId}
+            sessionCount={sessions.length}
+            pocId={selected}
+            onSent={onSent}
+            onNewSession={newSession}
+          />
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto bg-canvas p-4 lg:p-6">
+        <div className="min-h-0 flex-1 bg-panel">
           <PipelineBoard pocId={selected} refreshSignal={refreshSignal} pollMs={POLL_MS} />
         </div>
       </div>
