@@ -96,9 +96,15 @@ def check_agent(agent_dir: Path, errors: list[str]) -> None:
 # platform an A2A invocation is a CHILD EXECUTION of the calling turn and is cancelled when the turn ends
 # (and it is capped at 300 s), so a minutes-long stage started that way is killed mid-flight. These must be
 # started with a TOP-LEVEL platform invocation (its own root session) — see docs/06 "Platform execution
-# model". chat_call_draft is deliberately EXCLUDED: chat -> draft is a short in-turn hop that returns within
-# the turn and the ~5-min A2A token, so it stays on A2A (the one allowed A2A caller).
-CHAT_TOPLEVEL_START_TOOLS = ("chat_start_code_run", "chat_start_deploy_run", "chat_teardown", "chat_run_tests")
+# model". chat_call_draft is now here too: a rich transcript's draft can take minutes and blew the 300 s A2A
+# ceiling / lost the spec when the parent turn was cancelled, so draft is STARTED as a top-level invoke and
+# the Draft Agent's run document is polled — there is NO remaining A2A caller anywhere in the system.
+CHAT_TOPLEVEL_START_TOOLS = ("chat_call_draft", "chat_start_code_run", "chat_start_deploy_run",
+                             "chat_teardown", "chat_run_tests")
+
+# A2A caller markers that must NOT appear in the chat agent any more (it drives every stage via a top-level
+# platform invoke). Checked across the chat agent's source (main.py + a2a.py).
+CHAT_FORBIDDEN_A2A_MARKERS = ("A2AClient", ".find_agent(", "invoke_a2a", "_a2a_run(", "def _a2a(")
 
 # Agents whose durable / long-running graph calls ANOTHER agent. That call must go through the shared
 # platform_invoke helper (a top-level invoke — its own root session with a fresh token), never A2A: an A2A
@@ -112,6 +118,8 @@ CHAT_TOPLEVEL_START_TOOLS = ("chat_start_code_run", "chat_start_deploy_run", "ch
 #     the coder's task document instead. It must NOT use invoke_envelope for coders.
 #   - deploy-agent -> test/repair: uses the synchronous platform_invoke.invoke_envelope, whose disconnect on
 #     the cap is tolerated by the deploy_find_test_run + poll fallback.
+# (Chat starts every stage — draft included — as a top-level invoke via _invoke_run; see
+# check_chat_stage_starts. No A2A cross-agent call remains anywhere.)
 GRAPH_PLATFORM_INVOKE_CALLERS = {
     "coding-orchestrator": {"require": ("platform_invoke.start_invoke(",),
                             "forbid": ("platform_invoke.invoke_envelope(",)},
@@ -145,7 +153,8 @@ def check_graph_platform_invoke(errors: list[str]) -> None:
 
 
 def check_chat_stage_starts(errors: list[str]) -> None:
-    main_py = ROOT / "agents" / "chat-agent" / "src" / "agent_chat_agent" / "main.py"
+    chat_src = ROOT / "agents" / "chat-agent" / "src" / "agent_chat_agent"
+    main_py = chat_src / "main.py"
     if not main_py.is_file():
         errors.append("agents/chat-agent/main.py is missing")
         return
@@ -156,15 +165,29 @@ def check_chat_stage_starts(errors: list[str]) -> None:
         if i < 0:
             errors.append(f"chat-agent/main.py: start tool {tool!r} not found")
             continue
-        # inspect the tool body up to the next top-level def
-        j = text.find("\ndef ", i + 1)
-        body = text[i:j if j > 0 else len(text)]
+        # inspect the tool body up to the next top-level @app.tool / def
+        j = text.find("\n@app.tool", i + 1)
+        k = text.find("\ndef ", i + 1)
+        end = min(x for x in (j, k, len(text)) if x > 0)
+        body = text[i:end]
         if "_invoke_run(" not in body:
             errors.append(f"chat-agent/main.py: {tool!r} must start the stage via _invoke_run (top-level "
                           "invoke), not an A2A child call — see docs/06 'Platform execution model'")
         if "_a2a_run(" in body:
             errors.append(f"chat-agent/main.py: {tool!r} still uses the A2A child-call path _a2a_run "
                           "(cancelled when the chat turn ends)")
+
+    # The chat agent must retain NO A2A caller path at all: every stage (draft included) is a top-level
+    # invoke. Scan main.py + a2a.py for residual A2A markers.
+    for fname in ("main.py", "a2a.py"):
+        f = chat_src / fname
+        if not f.is_file():
+            continue
+        ftext = f.read_text()
+        for marker in CHAT_FORBIDDEN_A2A_MARKERS:
+            if marker in ftext:
+                errors.append(f"chat-agent/{fname} still contains the A2A caller marker {marker!r}; chat "
+                              "must drive every stage via a top-level platform invoke (no A2A caller remains)")
 
 
 def main() -> int:
