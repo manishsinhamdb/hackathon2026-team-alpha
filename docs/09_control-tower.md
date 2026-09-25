@@ -11,57 +11,97 @@ Full run/build/test instructions live in `apps/control-tower/README.md`; this do
 
 ## What it does
 
-Two panes on one laptop-width screen:
+Two screens, both laptop-first (1440-wide reference), built to the approved v2 design in
+`apps/control-tower/design/`.
 
-- **Left — chat.** A session id is generated per browser tab and shown; "New session" starts a fresh one.
-  Messages are kept client-side and the selected POC's stored conversation is recovered from the
-  `conversations` collection on load. Six quick-action buttons send canned messages through the same chat
-  path (scoped to the selected POC): *Show me the spec* · *Looks good, go ahead and build it* · *Deploy it, I
-  don't need to review the code (4-hour TTL)* · *How's it going?* · *Tear it down* · *Retry*. A textarea plus
-  a `.txt` file picker (pastes the file content into the message — no S3 upload in this version) handle
-  free-form input, e.g. pasting a meeting transcript to start a new POC.
-- **Right — pipeline board** for the selected POC: a stepper
-  **Draft → Spec approved → Code → Code approved → Deploy → Tests → Torn down**, each cell showing the run id,
-  status, and elapsed/final time (gates show who approved which version); a "Clarification needed" card when a
-  draft run finished with questions; a links card (App / API / Health) when deployed; a cloud-resources count
-  with a **red badge when > 0**; and a live TTL countdown. It reads the platform DB documents exactly as
-  `packages/shared_tools/poc_shared_tools/metadata.py` / `poc_contracts` define them.
+### 1. Workspace (`/`)
 
-The UI is **strictly read-only on the DB**. It never writes — every state change happens through the
-chat agent (and the agent's own tools), which is what the action buttons drive.
+- **Top bar.** Product mark *POC Builder / CONTROL TOWER*; a **POC selector** button showing the title,
+  `spec vNNN`, a status pill and `created <d Mon · HH:MM>` (click to pick another POC — archived POCs are
+  hidden here); **New POC** (green), **POC library**, a health chip `<project> · healthy` (green when the
+  last poll succeeded, red on error), and the signed-in user avatar.
+- **Left — Conversation.** The session id, `Sessions (n)` (opens the library) and `New session` links.
+  Messages are bubbles — user green (`#00684A`, right-aligned), agent card (`#112733`) with markdown and
+  per-message timestamps; **run ids in an agent reply are surfaced mono with a copy button** (a structured
+  hint). An *agent is replying* pill shows while a turn streams. The six action chips sit above the composer
+  (a transcript textarea + `.txt` picker + send); the canned messages are unchanged.
+- **Right — Pipeline** for the selected POC: the poc id and `live · refreshed Ns ago`; a **horizontal
+  7-stage stepper** *Draft → Spec approved → Code → Code approved → Deploy → Tests → Torn down* with states
+  **done** (green check + duration/version), **running** (blue ring + elapsed), **gate** (dashed ring, and
+  `gate · by <who> HH:MM` once recorded), **not started** (grey ring + a quiet hint) and **failed** (red ring
+  + error code); a **Code run** card listing each coder (contract / seed / backend / frontend / assemble) as
+  a progress row (done / running / queued, from the `tasks` collection); a right stack of **Cloud resources**
+  (green `0 active` / red `<n> active`), **Deployment** (App / API / Health, disabled until published; EC2 id
+  + TTL countdown when live) and **Versions** chips (spec / code / deploy); and a **Run history** table
+  (stage, run id, status pill, started, duration). A *Clarification needed* card appears when a draft run
+  finished with questions.
+
+### 2. POC library (`/library`)
+
+- A search box (title or poc id); filter chips **Active / Deployed / Torn down / Archived** with counts; a
+  table sorted **by created, newest first** — title + poc id, status pill, created (`d Mon YYYY · HH:MM`),
+  versions (`s3 · c1`), and **Open** (→ workspace with that POC selected) + **Archive / Restore**.
+- A right column: a **Sessions** card (this browser's chat sessions, persisted client-side, with
+  rename/close) and a **Today** card with four DB-derived counts (POCs drafted today, deployed & tested
+  today, cloud resources live, and the most recent transcript→tested duration).
+
+The stepper / gates / coder rows / run history / today counts are all derived from the read model
+(`src/lib/aggregate.ts`) — a pure function of the DB documents (`packages/shared_tools/poc_shared_tools/
+metadata.py` / `poc_contracts`), unit-tested with fixtures.
+
+### The one write: archive
+
+The UI is otherwise **strictly read-only on the DB** — every pipeline state change happens through the chat
+agent. The **single exception** is **Archive / Restore**, which sets/unsets `pocs.ui_archived: true` (plus
+`ui_archived_at`) via `POST /api/pocs/:id/archive`. **Agents ignore `ui_archived`**; it only controls UI
+visibility (hidden from the workspace selector, shown under the library's *Archived* filter). Runs, spec and
+code are untouched, so an archived POC can be restored at any time. The write is a pure `setArchived`
+function (`src/lib/archive.ts`) that only ever touches those two fields — covered by `src/test/archive.test.ts`
+with a fake collection.
+
+### Sessions
+
+Chat sessions are **client-side** (`src/lib/sessions.ts`, persisted in `localStorage`): a session is a
+browser-local thread (id generated per tab) tracked with a name, turn count and last-active time, shared
+between the workspace and the library. Conversation *history* still comes from the `conversations`
+collection on load; the session store never touches the server.
 
 ## The UI (structure & design)
 
-The visual layer is a **MongoDB-house / Leafygreen** design: the green accent `#00ED64` on near-black
-`#001E2B` for the top bar and dark surfaces, white / `#F9FBFA` content surfaces, a grey text scale,
-generous spacing and strong hierarchy — no gradients or decoration. It is built with **Tailwind**
-(semantic colour tokens driven by CSS variables, so the same classes render in light and dark),
-**lucide-react** icons and **react-markdown + remark-gfm** for agent replies. **Light is the default;
-the app honours `prefers-color-scheme: dark`.** Layout is laptop-first — two columns ≥1024px, stacked
-below. Data flows and routes are unchanged from the functional version; this is a presentation layer only.
+The visual layer is the approved **v2 dark design** (`apps/control-tower/design/`): the Leafygreen accent
+`#00ED64` on near-black ink `#001E2B`, `#112733` cards, a `#06232F` pipeline column, and a fixed state
+palette — running blue (`#0498EC` / `#C3E7FE` on `#0C3B5B`), questions amber (`#FFDD49` on `#3B2A0B`),
+failed (`#FF9F97` on `#3D1512`), success mint (`#71F6BA` on `#023430`). Fonts are **Sora** (headings),
+**IBM Plex Sans** (body) and **IBM Plex Mono** (ids), loaded from Google Fonts via a `<link>` (no build-time
+font fetch; falls back to system fonts if blocked). Built with **Tailwind** (literal hex tokens in
+`tailwind.config.ts`), **lucide-react** icons and **react-markdown + remark-gfm**. **Light theme is not part
+of this round — the app is dark-only** (`prefers-color-scheme` handling was dropped as it no longer earns
+its keep). Layout is laptop-first; the workspace is chat (5/12) · pipeline (7/12), stacked below `lg`.
 
 Components (`src/components/`):
 
-- **`TopBar`** — product name *POC Builder — Control Tower*, the POC selector (title + a status pill),
-  **New POC** and **New session** actions, and a connection/health dot (green when the last poll
-  succeeded, red on error).
-- **`Chat`** — messages as bubbles with **markdown rendering** (tables and code blocks), per-message
-  timestamps, a three-dot **streaming indicator** while a turn is in flight, and a sticky composer: a
-  transcript textarea + `.txt` picker and a compact row of **action chips** (*Show me the spec* · *Build
-  it* · *Deploy (4h TTL)* · *How's it going?* · *Tear it down* · *Retry*). **Enter sends; Shift+Enter is a
-  newline.** The chips send the same canned messages as before (behaviour unchanged; only the labels are
-  compact). `MessageBubble` renders one bubble; recovered history is shown dimmed behind a toggle.
-- **`Stepper`** — the vertical **Draft → Spec approved → Code → Code approved → Deploy → Tests → Torn
-  down** stage stepper. Each cell shows its state — *not started* / *running* with a live elapsed timer /
-  *succeeded* with a final duration / *failed* with the error code+reason — gates show *approved
-  \<version\> by \<who\>*, and run ids are click-to-copy. `StageStep` is pure (given a `StageCell` + `now`)
-  and is covered by render tests (`src/test/stepper.test.tsx`).
-- **`PipelineBoard`** — the stepper plus cards: **Clarification needed** (questions rendered, "answer in
-  chat" hint), **Deployment** (App / API / Health as buttons, copyable EC2 id, live TTL countdown),
-  **Cloud resources** (green `0` / red `>0` badge + table), **Test report** summary, and Spec/Code version
-  chips in the header. The 10 s polling, 1 s ticker, tab-hidden pause and post-chat refresh are unchanged.
-- **`Toasts`** — error toasts for BFF failures (chat and poll), with dedup so a repeatedly failing poll
-  doesn't spam. **Loading skeletons** and **empty states** cover first paint and the "no POC selected" case.
+- **`TopBar`** — product mark, the POC selector dropdown (title, `spec vNNN`, status pill, created), **New
+  POC**, a **POC library** link, the health chip and user avatar. Archived POCs are filtered out of the
+  selector by the parent.
+- **`Chat`** — the Conversation pane: session id, `Sessions (n)` / `New session`, bubbles via
+  `MessageBubble` (markdown, timestamps, run-id copy hints, recovered history behind a toggle), the
+  *agent is replying* pill (`ReplyingPill`), the six action chips and the composer. **Enter sends;
+  Shift+Enter is a newline.** Canned messages are unchanged.
+- **`Stepper`** — the **horizontal** 7-stage stepper. `StageStep` is pure (given a `StageCell` + `now`) and
+  maps to *done / running / gate / not-started / failed*; covered by `src/test/stepper.test.tsx`.
+- **`CodeRun`** — the Code run card: each coder (contract / seed / backend / frontend / assemble) as a
+  progress row (done / running / queued), derived from the code run's tasks.
+- **`RunHistory`** — the run-history table (stage, run id, status pill, started, duration).
+- **`PipelineBoard`** — composes the header, stepper, clarification card, Code run, the right stack (Cloud
+  resources / Deployment / Versions) and Run history. The 10 s poll, 1 s ticker, tab-hidden pause and
+  post-chat refresh are unchanged.
+- **`Library`** — the `/library` screen (search, filter chips, table with Archive/Restore, Sessions card,
+  Today card). Filters/sort/counts come from pure helpers in `aggregate.ts`
+  (`selectPocs` / `filterCounts` / `matchesFilter`), unit-tested in `src/test/aggregate.test.ts`.
+- **`ui.tsx`** — shared primitives: `StatusPill` / `RunStatusPill` (the five design tones), `VersionChip`,
+  `HealthChip`, `CopyId` / `CopyButton`, `Card` / `CardTitle`, `Skeleton`.
+- **`Toasts`** — error toasts for BFF failures, deduped so a repeatedly failing poll doesn't spam. Loading
+  skeletons and empty states cover first paint and the "no POC selected" case.
 
 ## The polling design
 

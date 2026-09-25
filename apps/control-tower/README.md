@@ -24,18 +24,30 @@ browser  ──HTTP──►  Next.js server (BFF)  ──►  platform invoke A
   rich spec summary that exceeds the ~60 s synchronous gateway cap) still returns the real reply; falls back
   to the synchronous `/invoke` if streaming errors, and surfaces a 504 / timeout gracefully as "still
   replying, poll".
-- `GET /api/pocs` — recent POCs (id, title, status, versions, updated_at).
-- `GET /api/pocs/:id` — the aggregated read model the board polls: poc doc + runs (stage/run_id/status/
-  timings) + tasks per run + active cloud_resources + latest deployment (app/api/health URLs, EC2 id, TTL) +
-  latest test summary + pending clarification questions. **Never writes.**
+- `GET /api/pocs` — POCs (id, title, status, versions, created_at, updated_at, ui_archived).
+- `GET /api/pocs/:id` — the aggregated read model the board polls: poc doc + runs + tasks + active
+  cloud_resources + latest deployment (app/api/health URLs, EC2 id, TTL) + test summary + clarification +
+  the derived stepper cells, coder rows and run-history rows. **Never writes.**
 - `GET /api/pocs/:id/conversation` — the POC's stored conversation, recovered on load.
+- `POST /api/pocs/:id/archive` — **the only write**: set/unset `pocs.ui_archived` (+ `ui_archived_at`).
+  Body `{ archived: boolean }`. Agents ignore the field; it only controls UI visibility.
+- `GET /api/summary` — the library "Today" counts (drafted today, deployed & tested today, cloud resources
+  live, most recent transcript→tested duration).
 - `GET /healthz` — liveness (no DB / platform dependency).
 
-The client is two panes: **left** a chat session (id generated per browser tab, "New session" button,
-history recovered from the `conversations` collection); **right** a pipeline board (a
-Draft → Spec approved → Code → Code approved → Deploy → Tests → Torn down stepper, clarification card,
-deployment links, cloud-resource count with a red badge when > 0, TTL countdown). The board polls
-`GET /api/pocs/:id` every 10 s (pausing when the tab is hidden) and refreshes immediately after a chat turn.
+The client is **two screens** (the approved v2 dark design in `design/`):
+
+- **Workspace (`/`)** — a top bar (POC selector, New POC, POC library, health chip), a **Conversation**
+  pane (client-side sessions, history recovered from `conversations`, action chips, composer) and a
+  **Pipeline** pane (horizontal Draft → Spec approved → Code → Code approved → Deploy → Tests → Torn down
+  stepper, Code run coder rows, Cloud resources / Deployment / Versions stack, Run history, clarification
+  card). The board polls `GET /api/pocs/:id` every 10 s (pausing when the tab is hidden) and refreshes
+  immediately after a chat turn.
+- **Library (`/library`)** — search + filter chips (Active / Deployed / Torn down / Archived, with counts),
+  a table sorted by created desc with **Open** and **Archive / Restore**, and a Sessions + Today sidebar.
+
+Chat **sessions are client-side** (`localStorage`, `src/lib/sessions.ts`), shared between both screens;
+conversation history still comes from the DB. The UI is read-only except the archive write above.
 
 ## Environment variables
 
@@ -87,10 +99,13 @@ The image is multi-stage (`node:20-alpine`), runs as a non-root user, honours `P
 npm test
 ```
 
-Covers the **token cache** (caching within TTL, refresh on expiry, force refresh, TTL floor, credential-safe
-error, 401 retry on invoke, 504→pending, SSE parsing) and the **POC status aggregation** (stepper mapping,
-gates, clarification, deployment URLs, test summary, task ordering, live elapsed, active-resource count)
-with a fake fetch/clock and fixture DB documents — no network or DB required.
+Covers the **token cache** (caching within TTL, refresh, TTL floor, credential-safe error, 401 retry,
+504→pending, SSE parsing); the **aggregation** (stepper mapping, gates, clarification, deployment URLs, test
+summary, coder-row mapping, run-history display status, `summarizeToday`, and the library
+filters/counts/sort); the **stepper state mapping** (done / running / gate / not-started / failed) via
+`StageStep` render tests; and the **archive write** (`setArchived` against a fake collection, asserting it
+only ever touches `ui_archived` / `ui_archived_at`). Fake fetch/clock and fixture documents — no network or
+DB required. `npm test` → 49 tests.
 
 ## Point it at another project / workspace
 
