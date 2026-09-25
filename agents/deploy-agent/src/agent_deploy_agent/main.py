@@ -9,8 +9,9 @@ The graph is the step pipeline: check_gate → provision_db → store_secret →
 → seed_data → build_backend → start_backend → build_frontend → publish_frontend → write_deployment → run_tests → finalize.
 Every step executes in the Tool Pod (deploy_execute_step) and records itself in the `runs` collection, so a run
 can be resumed from its last completed step. Failures in repairable steps call the Coding Orchestrator's
-repair_component over A2A (max 3 per component); tests go to the Test Agent over A2A. Both callees reply
-`started` and are polled through `runs`.
+repair_component (max 3 per component); tests go to the Test Agent. Both are SYNCHRONOUS TOP-LEVEL platform
+invocations (poc_shared_tools.platform_invoke), not A2A children: they run late in a long deploy run, past
+the ~5-min OE A2A token, so each runs in its own root session with a fresh token and replies `succeeded`.
 
     RUNNER_MODE=aer   -> LangGraph execution (this graph)
     RUNNER_MODE=tool  -> Tool functions below
@@ -31,8 +32,9 @@ from langgraph.graph.state import CompiledStateGraph
 from agent_engine_sdk_langgraph import App
 
 from poc_contracts import Envelope, ContractError, new_id, validate
+from poc_shared_tools import platform_invoke
 from agent_deploy_agent import pipeline
-from agent_deploy_agent.a2a import A2AClient, invoke_tool
+from agent_deploy_agent.a2a import invoke_tool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%H:%M:%S", stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -46,6 +48,11 @@ logger.info("✅ App created")
 POLL_S = 15
 REPAIR_WAIT_S = 20 * 60
 TEST_WAIT_S = 20 * 60
+# run_tests (-> test agent) and repair_component (-> coding orchestrator) happen late in a long deploy run,
+# past the ~5-min OE A2A token, so they are SYNCHRONOUS TOP-LEVEL platform invocations (each its own root
+# session with a fresh token). The client timeout is generous — the callee (a test run a few minutes; a
+# repair code run ~6 min) runs entirely within the call.
+INVOKE_TIMEOUT_S = 15 * 60
 
 
 # =============================================================================
@@ -212,7 +219,6 @@ def _last_human_text(messages: list[BaseMessage]) -> str:
 def build_agent() -> CompiledStateGraph:
     logger.info("Building Deploy Agent graph...")
     tools = {t.name: t for t in app.get_tools()}
-    a2a = A2AClient(app)
 
     def call(name: str, **kw: Any) -> dict[str, Any]:
         out = invoke_tool(tools[name], kw)
@@ -292,8 +298,11 @@ def build_agent() -> CompiledStateGraph:
                                tool="repair_component", task_id=fr["task_id"], trace_id=req.get("trace_id"),
                                params={"code_version": fr["failure_report"]["code_version"], "component": fr["failure_report"]["component"],
                                        "failure": fr["failure_report"]})
+        user_id = app.get_current_user_id() or "u_local"
         try:
-            resp = a2a.invoke(a2a.find_agent("code-orchestration"), env)["response"]
+            resp = platform_invoke.invoke_envelope(
+                "code-orchestration", env, user_id=user_id,
+                session_id=f"repair-{state['run_id']}-{fr['task_id']}", timeout_s=INVOKE_TIMEOUT_S)["response"]
         except Exception as e:
             return {"last_error": err | {"exhausted": True, "message": f"repair call failed: {e}"}}
         if resp["status"] not in ("started", "succeeded"):
@@ -320,10 +329,16 @@ def build_agent() -> CompiledStateGraph:
         env = Envelope.request(poc_id=state["poc_id"], run_id=state["run_id"], caller=AGENT_NAME, agent="test_agent", tool="run_e2e",
                                trace_id=req.get("trace_id"), params={"deployment_run_id": state["run_id"], "scope": "all"})
         resp = None
+        user_id = app.get_current_user_id() or "u_local"
         try:
-            resp = a2a.invoke(a2a.find_agent("e2e-tests"), env)["response"]
+            # SYNCHRONOUS top-level invoke: the test agent runs the whole suite in its own root session and
+            # replies `succeeded` with the report. Its own token is fresh, so a run past the ~5-min A2A token
+            # (which this deploy run has almost certainly crossed by now) is fine.
+            resp = platform_invoke.invoke_envelope(
+                "e2e-tests", env, user_id=user_id,
+                session_id=f"test-{state['run_id']}", timeout_s=INVOKE_TIMEOUT_S)["response"]
         except Exception as invoke_exc:
-            # A2A call failed or timed out — look up the test run by deployment_run_id;
+            # The invoke disconnected or failed — look up the test run by deployment_run_id;
             # the Test Agent may have already created it (design decision 3).
             fr = call("deploy_find_test_run", deployment_run_id=state["run_id"])
             if "error" not in fr:
