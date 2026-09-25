@@ -4,19 +4,25 @@ import { useCallback, useEffect, useState } from "react";
 import type { PocSummary } from "@/lib/types";
 import Chat from "./Chat";
 import PipelineBoard from "./PipelineBoard";
+import TopBar from "./TopBar";
+import { ToastProvider } from "./Toasts";
 
 const POLL_MS = 10_000;
 
 function newSessionId(): string {
-  const rnd = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID().slice(0, 8) : Math.random().toString(36).slice(2, 10);
+  const rnd =
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID().slice(0, 8)
+      : Math.random().toString(36).slice(2, 10);
   return `ct-${rnd}`;
 }
 
-export default function ControlTower() {
+function ControlTowerInner() {
   const [pocs, setPocs] = useState<PocSummary[]>([]);
   const [selected, setSelected] = useState<string>("");
   const [sessionId, setSessionId] = useState<string>("");
   const [listError, setListError] = useState<string>("");
+  const [loaded, setLoaded] = useState(false);
   // Bumped after a chat turn completes so the board fetches immediately instead of waiting for the next tick.
   const [refreshSignal, setRefreshSignal] = useState(0);
 
@@ -34,6 +40,8 @@ export default function ControlTower() {
       setListError("");
     } catch (err) {
       setListError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoaded(true);
     }
   }, []);
 
@@ -64,41 +72,45 @@ export default function ControlTower() {
   }, [loadPocs]);
 
   const onNewSession = () => setSessionId(newSessionId());
+  // "New POC": clear the selection and start a fresh session so a pasted transcript starts a brand-new POC
+  // (canned actions scope to a selected POC; free-typed input with none selected is sent verbatim).
+  const onNewPoc = () => {
+    setSelected("");
+    setSessionId(newSessionId());
+  };
   const onSent = useCallback(() => setRefreshSignal((n) => n + 1), []);
 
-  return (
-    <div className="app">
-      <div className="topbar">
-        <h1>🛫 Control Tower</h1>
-        <span className="poc-list">
-          <label htmlFor="poc-select" style={{ color: "var(--muted)" }}>POC</label>
-          <select
-            id="poc-select"
-            value={selected}
-            onChange={(e) => setSelected(e.target.value)}
-          >
-            <option value="">— select a POC —</option>
-            {pocs.map((p) => (
-              <option key={p.poc_id} value={p.poc_id}>
-                {p.title} · {p.status} {p.versions.spec ? `· spec ${p.versions.spec}` : ""}
-              </option>
-            ))}
-          </select>
-        </span>
-        <div className="spacer" />
-        {listError ? <span className="err mono">list error: {listError}</span> : null}
-        <span className="session-id">session {sessionId || "…"}</span>
-        <button onClick={onNewSession}>New session</button>
-      </div>
+  const connection: "ok" | "error" | "loading" = listError ? "error" : loaded ? "ok" : "loading";
 
-      <div className="panes">
-        <div className="pane-left">
+  return (
+    <div className="flex h-screen flex-col overflow-hidden">
+      <TopBar
+        pocs={pocs}
+        selected={selected}
+        onSelect={setSelected}
+        onNewPoc={onNewPoc}
+        onNewSession={onNewSession}
+        sessionId={sessionId}
+        connection={connection}
+      />
+
+      {/* Two columns ≥1024px; stacked below. */}
+      <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        <div className="flex h-[55vh] min-h-0 shrink-0 flex-col border-b border-line lg:h-auto lg:w-[42%] lg:min-w-[380px] lg:max-w-[560px] lg:border-b-0 lg:border-r">
           <Chat sessionId={sessionId} pocId={selected} onSent={onSent} />
         </div>
-        <div className="pane-right">
+        <div className="min-h-0 flex-1 overflow-y-auto bg-canvas p-4 lg:p-6">
           <PipelineBoard pocId={selected} refreshSignal={refreshSignal} pollMs={POLL_MS} />
         </div>
       </div>
     </div>
+  );
+}
+
+export default function ControlTower() {
+  return (
+    <ToastProvider>
+      <ControlTowerInner />
+    </ToastProvider>
   );
 }
