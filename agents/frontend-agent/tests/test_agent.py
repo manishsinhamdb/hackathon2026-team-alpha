@@ -87,6 +87,16 @@ def test_generate_backfills_missing_readme():
     assert len(llm.calls) == 1                            # no retry needed
 
 
+def test_parse_output_tolerates_trailing_and_leading_prose():
+    # A repair generation once failed with "Extra data: line 1 column N" because the model appended
+    # notes after the JSON object. parse_output must decode the first complete JSON value and ignore
+    # any surrounding prose (leading sentence or trailing explanation / second block).
+    body = json.dumps({"files": {"src/main.tsx": "x"}})
+    assert pipeline.parse_output(body + "\n\nHere is what I changed: ...")["files"]["src/main.tsx"] == "x"
+    assert pipeline.parse_output("Sure! " + body)["files"]["src/main.tsx"] == "x"
+    assert pipeline.parse_output("```json\n" + body + "\n```\nDone.")["files"]["src/main.tsx"] == "x"
+
+
 def test_missing_testid_is_flagged():
     errs = pipeline.validate_files(_valid_files(include_testids=False), pipeline.all_testids(SPEC))
     assert any("data-testids" in e for e in errs)

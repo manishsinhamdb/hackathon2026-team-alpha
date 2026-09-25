@@ -337,7 +337,17 @@ def _strip_fences(text: str) -> str:
 
 
 def parse_output(text: str) -> dict[str, Any]:
-    obj = json.loads(_strip_fences(text))
+    t = _strip_fences(text)
+    try:
+        obj = json.loads(t)
+    except json.JSONDecodeError:
+        # The model sometimes trails prose, REPAIR_NOTES, or a second block after the JSON object
+        # ("Extra data: line 1 column N"), or prefixes a sentence before it. Decode only the first
+        # complete JSON value (starting at the first brace) and ignore anything after it.
+        start = t.find("{")
+        if start < 0:
+            raise
+        obj, _end = json.JSONDecoder().raw_decode(t[start:])
     if not isinstance(obj, dict) or "files" not in obj or not isinstance(obj["files"], dict):
         raise ValueError('output must be a JSON object of shape {"files": {"path": "content", ...}}')
     return obj
