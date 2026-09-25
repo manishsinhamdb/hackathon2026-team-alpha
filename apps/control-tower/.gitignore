@@ -1,0 +1,15 @@
+# dependencies / build
+/node_modules
+/.next
+/out
+/.turbo
+
+# env — secrets never committed (the root .gitignore also covers .env*)
+.env
+.env.*
+!.env.example
+
+# misc
+*.tsbuildinfo
+next-env.d.ts.timestamp
+.DS_Store
