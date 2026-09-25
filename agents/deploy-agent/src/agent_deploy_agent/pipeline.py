@@ -168,15 +168,18 @@ def run_step(run: dict[str, Any], step: str) -> dict[str, Any]:
             msg = (f"public {api_path}/health -> {pub['health']['status'] or '?'} body[:300]={pub['health']['body'][:300]!r}; "
                    f"public / -> {pub['root']['status'] or '?'} body[:120]={pub['root']['body'][:120]!r}")
             return _err("HEALTHCHECK_FAILED", msg, component="backend", log_key=pub.get("log_key"))
+        # Public URLs use the EC2 public DNS name (matches the golden deployment and is what the egress
+        # proxy accepts — it refuses raw-IP hosts). Fall back to the IP only if no DNS name was assigned.
+        host = o.get("public_dns") or o["public_ip"]
         # Best-effort: also probe from the Tool Pod, but never fail the step on a proxy-generated response.
         try:
-            hc = ssm.http_healthcheck(f"http://{o['public_ip']}{api_path}/health", 200, timeout_s=15)
+            hc = ssm.http_healthcheck(f"http://{host}{api_path}/health", 200, timeout_s=15)
             if not hc["ok"]:
                 log.info("publish_frontend: Tool Pod probe did not pass (status=%s proxy_denied=%s body=%r); "
                          "SSM public check already passed, continuing", hc.get("status"), hc.get("proxy_denied"), (hc.get("body") or "")[:200])
         except Exception as e:  # advisory only
             log.info("publish_frontend: Tool Pod probe errored (%s); ignoring", e)
-        return _ok(urls={"app": f"http://{o['public_ip']}/", "api": f"http://{o['public_ip']}{api_path}", "health": f"http://{o['public_ip']}{api_path}/health"})
+        return _ok(urls={"app": f"http://{host}/", "api": f"http://{host}{api_path}", "health": f"http://{host}{api_path}/health"})
 
     if step == "write_deployment":
         steps_doc = [{"name": s["name"], "status": s["status"], **({"log_key": s["log_key"]} if s.get("log_key") else {}),

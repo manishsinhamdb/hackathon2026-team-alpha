@@ -88,7 +88,7 @@ def test_happy_path_with_tests(fake_md, monkeypatch):
     def test_agent(env):
         rid = new_id("run"); fake_md.runs[rid] = {"run_id": rid, "stage": "test", "status": "succeeded", "outputs": {"failed": 0, "report_key": f"pocs/{POC}/test/{rid}/test_report.json"}, "steps": []}
         return Envelope.started(env["request"]["task_id"], rid)
-    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {}}, {"test_agent": test_agent})
+    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {}}, {"e2e-tests": test_agent})
     assert resp["status"] == "succeeded", resp
     assert resp["result"]["urls"]["app"] == "http://1.2.3.4/" and resp["result"]["test_passed"] is True
     assert [a["kind"] for a in resp["artifacts"]] == ["deployment", "report"]
@@ -113,7 +113,7 @@ def test_repair_loop_then_success(fake_md, monkeypatch):
     import poc_shared_tools.s3 as s3
     monkeypatch.setattr(s3, "put_object", lambda *a, **k: {"key": a[2]})
     monkeypatch.setattr(s3, "get_text", lambda key: json.dumps({"bundle_key": key.replace("poc.manifest.json", "bundle.tar.gz"), "contract_key": key.replace("poc.manifest.json", "api_contract.yaml")}))
-    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {"run_tests": False}}, {"coding_orchestrator": orchestrator})
+    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {"run_tests": False}}, {"code-orchestration": orchestrator})
     assert resp["status"] == "succeeded", resp
     run = next(r for r in fake_md.runs.values() if r["stage"] == "deploy")
     assert run["repair_attempts"] == {"frontend": 1} and run["outputs"]["code_version"] == "v002"
@@ -128,9 +128,41 @@ def test_repair_exhausted_fails_cleanly(fake_md, monkeypatch):
     import poc_shared_tools.s3 as s3
     monkeypatch.setattr(s3, "put_object", lambda *a, **k: {"key": a[2]})
     monkeypatch.setattr(s3, "get_text", lambda key: json.dumps({"bundle_key": "pocs/x/code/v002/bundle.tar.gz", "contract_key": "pocs/x/code/v002/api_contract.yaml"}))
-    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {"run_tests": False}}, {"coding_orchestrator": orchestrator})
+    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {"run_tests": False}}, {"code-orchestration": orchestrator})
     assert resp["status"] == "failed" and resp["error"]["code"] == "BUILD_ERROR"
     assert resp["error"]["detail"]["repair_attempts"] == {"frontend": 4}  # 3 repairs used, 4th bump marks exhausted
+
+
+def test_failed_deploy_resets_poc_status(fake_md, monkeypatch):
+    # A deploy that fails at a non-repairable step must release pocs.status from the
+    # transient "deploying" back to "code_ready" (deploy_start_run set it to "deploying").
+    _fake_steps(monkeypatch, fail_at={"provision_db": 99})
+    assert fake_md.pocs[POC]["status"] == "code_ready"
+    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {"run_tests": False}})
+    assert resp["status"] == "failed"
+    run = next(r for r in fake_md.runs.values() if r["stage"] == "deploy")
+    assert run["status"] == "failed"
+    assert fake_md.pocs[POC]["status"] == "code_ready"
+
+
+def test_publish_frontend_urls_use_public_dns(monkeypatch):
+    # The public-facing URLs must use the EC2 public DNS name (as the golden deployment does), not the raw
+    # public IP — the egress proxy refuses raw-IP hosts and the DNS name is the stable public address.
+    from poc_infra_tools import ssm
+    monkeypatch.setattr(ssm, "publish_frontend_nginx", lambda *a, **k: {"exit_code": 0, "stdout": "", "stderr": ""})
+    monkeypatch.setattr(ssm, "public_healthcheck_via_ssm", lambda *a, **k: {"ok": True})
+    monkeypatch.setattr(ssm, "http_healthcheck", lambda *a, **k: {"ok": True})
+    run = {"poc_id": POC, "run_id": "run_x", "inputs": {"code_version": "v001", "options": {}},
+           "outputs": {"code_version": "v001", "instance_id": "i-1", "public_ip": "1.2.3.4",
+                       "public_dns": "ec2-1-2-3-4.ap-south-1.compute.amazonaws.com",
+                       "frontend_manifest": {"workdir": "frontend", "static_dir": "dist",
+                                             "publish": {"api_proxy": {"path": "/api", "upstream": "http://127.0.0.1:8080"}}}}}
+    r = pipeline.run_step(run, "publish_frontend")
+    assert r["ok"], r
+    urls = r["outputs"]["urls"]
+    assert urls["app"] == "http://ec2-1-2-3-4.ap-south-1.compute.amazonaws.com/"
+    assert urls["api"] == "http://ec2-1-2-3-4.ap-south-1.compute.amazonaws.com/api"
+    assert "1.2.3.4" not in json.dumps(urls)  # never the raw IP
 
 
 def test_invalid_envelope():

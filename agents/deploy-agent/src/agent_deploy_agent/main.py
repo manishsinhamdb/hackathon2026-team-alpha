@@ -293,7 +293,7 @@ def build_agent() -> CompiledStateGraph:
                                params={"code_version": fr["failure_report"]["code_version"], "component": fr["failure_report"]["component"],
                                        "failure": fr["failure_report"]})
         try:
-            resp = a2a.invoke(a2a.find_agent("coding_orchestrator"), env)["response"]
+            resp = a2a.invoke(a2a.find_agent("code-orchestration"), env)["response"]
         except Exception as e:
             return {"last_error": err | {"exhausted": True, "message": f"repair call failed: {e}"}}
         if resp["status"] not in ("started", "succeeded"):
@@ -321,7 +321,7 @@ def build_agent() -> CompiledStateGraph:
                                trace_id=req.get("trace_id"), params={"deployment_run_id": state["run_id"], "scope": "all"})
         resp = None
         try:
-            resp = a2a.invoke(a2a.find_agent("test_agent"), env)["response"]
+            resp = a2a.invoke(a2a.find_agent("e2e-tests"), env)["response"]
         except Exception as invoke_exc:
             # A2A call failed or timed out — look up the test run by deployment_run_id;
             # the Test Agent may have already created it (design decision 3).
@@ -456,11 +456,18 @@ def deploy_set_outputs(run_id: str, outputs_json: str) -> str:
 
 @app.tool(is_local=False, timeout=30)
 def deploy_finish_run(run_id: str, status: str, error_json: str = "", outputs_json: str = "") -> str:
-    """Finish a run with status succeeded|failed, optional error and outputs (JSON strings)."""
+    """Finish a run with status succeeded|failed, optional error and outputs (JSON strings).
+
+    A failed deploy run releases the POC from the transient "deploying" status back to "code_ready"
+    so the operator can start a fresh deploy (or resume) without the status being stuck. deploy_start_run
+    flips pocs.status to "deploying"; this is the counterpart that undoes it on failure. Only deploy-stage
+    runs are affected — teardown finishes via metadata.finish_run directly, not this tool."""
     from poc_shared_tools import metadata as md
     err = json.loads(error_json) if error_json else None
     outs = json.loads(outputs_json) if outputs_json else None
     r = md.finish_run(run_id, status, outputs=outs, error=err)
+    if status == "failed" and r.get("stage") == "deploy":
+        md.update_poc_status(r["poc_id"], "code_ready")
     return json.dumps({"run_id": r["run_id"], "status": r["status"]})
 
 
