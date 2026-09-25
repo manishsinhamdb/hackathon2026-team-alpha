@@ -8,6 +8,7 @@ license = {text = "Apache-2.0"}
 dependencies = [
     "agent-engine-runner-shared[mongodb,tracing]",
     "agent-engine-sdk-langgraph",
+    "protobuf>=6.33.6,<7",
     "python-dotenv>=1.0.0",
     "grpcio>=1.76.0",
     "grpcio-health-checking>=1.76.0",

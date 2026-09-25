@@ -36,3 +36,5 @@ build
 # Keys & certificates (also always excluded as an un-removable floor)
 *.pem
 *.key
+
+uv.lock
