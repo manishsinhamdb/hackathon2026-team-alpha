@@ -513,3 +513,70 @@ succeeded (4 resources released) → status `torn_down`, active cloud_resources 
 msinha- instances. Atlas service-account API access list holds 54.227.181.25, 44.214.209.237, 52.44.27.64
 (0.0.0.0/0 is refused for service accounts; pod egress may rotate). Remaining housekeeping: golden POC
 `poc_01K5ZGF1XTVREG0000000000A1` still carries 2 non-billable Atlas entries — clear via teardown/reaper.
+
+## Draft stage is now START-AND-POLL — the transport rule covers every stage (2026-09-25)
+
+The draft stage was the last synchronous cross-agent call. `chat_call_draft` invoked the Draft Agent over
+**A2A inside the chat turn** and summarised the reply in the same turn. That works only while the draft
+finishes fast (the recsys transcript, ~2 min). A **richer transcript** blows the ceilings:
+
+**Evidence that forced the change (platform logs/traces, DailyDabba POC `poc_01M3CHJMABWPXT6XP182RHSCEK`).**
+A fixtures-worthy order-analytics transcript takes **~4 min in `draft_generate`** alone. The chat→draft A2A
+call hit the **300 s A2A ceiling** (trace `chat_call_draft` 306 s); the platform then **cancelled the Draft
+Agent's child execution before `draft_finalize` ran** (log showed `draft_generate` success at 233 s and
+255 s, but `draft_finalize` **never**), so the spec was lost **twice** (both `draft_generate`s had already
+written `spec/v001` and `spec/v002` to S3 before the cancel — see the version note below). The retry then
+failed **A2A discovery** because the session's A2A token had passed its ~5-min lifetime (`no A2A agent
+matching 'draft-spec'`). And because the Draft Agent created no run document (it was built to answer within
+the turn), chat's status tool reported **"no active draft run is registered"**.
+
+**The fix (same start-and-poll pattern as code/deploy/teardown):**
+- **Draft Agent** now REGISTERS a run document at graph start (`draft_start_run`: stage `draft`, status
+  `running`, the one-running-per-stage index; POC → `drafting`) and FINISHES it (`draft_finish_run`):
+  drafted/force-drafted → `succeeded` (`outputs.spec_version`; the POC is set `spec_ready` by
+  `draft_finalize` as before); clarification questions → `succeeded` carrying the questions in
+  `outputs` (`needs_clarification`/`questions`/`round`), with the pending-clarifications S3 file kept as
+  today; any tool error → `failed`. The `draft_spec` envelope contract is unchanged (start/finish are
+  internal Tool-Pod tools), so the fake-SDK tests and `gen_golden_check`/`draft_check` are unaffected.
+- **Chat** `chat_call_draft` is now a `_invoke_run` START (top-level platform invoke of `draft-spec` via
+  `poc_shared_tools.platform_invoke`, exactly like `chat_start_code_run`): the Draft Agent runs as its own
+  ROOT session, so it survives the chat turn ending and the ~60 s synchronous gateway cap, and it keeps
+  running server-side after chat disconnects. The turn **fast-acks** `{"status","run_id"}` in <60 s.
+- **The chat→draft A2A path is gone** (no `A2AClient`, no `_a2a`/`_a2a_run` in chat; `a2a.py` keeps only the
+  SDK `invoke_tool` shim + the envelope unwrapper). **No A2A cross-agent call remains anywhere in the
+  system.** `scripts/check_platform_contract.py` now asserts `chat_call_draft` uses `_invoke_run` and that
+  the chat agent carries no A2A caller marker.
+
+**How "how's it going?" surfaces questions/spec** (chat SYSTEM_PROMPT rule 2): chat reads the draft run
+(`chat_find_run(poc_id,"draft")` + `chat_get_run_status`) **and** the POC (`chat_get_poc`), then decides —
+POC `spec_ready` → read `poc_spec.md` and summarise + spec_version (as after a synchronous draft); draft run
+`succeeded` with `outputs.needs_clarification` → present the questions verbatim (clarification flow);
+queued/running → "still drafting"; `failed` → show the error and offer "retry drafting". Clarification
+answers start a new draft run the same way; "retry drafting" re-fires the start.
+
+### Cloud proof (2026-09-25) — draft-agent `deploy-f56ecc30` (build `bld_01M3CMEKSTT31Y6K656T47M2QB`), chat-agent `deploy-88bd532b` (build `bld_01M3CMERM82XXDTJQD32V4RVPQ`); both invoke-proven
+
+Driven through the **deployed** chat agent over `agentic invoke --stream --timeout 8m` — **no AWS resources
+created** (draft only; no code/deploy/teardown ran):
+
+- **DailyDabba resume** (`poc_01M3CHJMABWPXT6XP182RHSCEK`, session `draftfix-…`): "retry drafting" → chat
+  fast-acked a draft run in seconds (no 300 s stall). First run finished with a **round-2 clarification
+  question** (timeline/deadline), which "how's it going?" surfaced verbatim; answering "demo in two weeks"
+  started run `run_01M3CN9ANTM0D1CCBYZR1E0BDX` → **spec_ready v003** (see version note). Draft Agent log
+  shows this run as a ROOT session: `draft_start_run` 16:09:59 → `draft_generate success (254954 ms ≈
+  4 m 15 s)` 16:14:59 → **`draft_finalize success` 16:15:39** → `draft_finish_run success` 16:15:46
+  (**start→finish ≈ 5 m 47 s**). "Show me the spec" summarised the three aggregation-pipeline views:
+  **(1) city & kitchen leaderboard, (2) delivery-time distribution buckets (<20/20–30/30–45/>45 min),
+  (3) coupon effectiveness (rolling 7-day trend)** — plus a raw-pipeline-JSON inspector and a single public
+  URL. Stopped after the spec (did NOT build/deploy).
+  - **Version note:** the task expected v001, but the two earlier LOST attempts each wrote `spec/vNNN` to S3
+    before the old 300 s cancel, so `s3.next_version` allocated **v003** for the first *finalized* draft.
+    This is the pre-existing S3 state of the parked POC, not a regression.
+- **recsys regression** (fresh session, `fixtures/transcripts/recsys_meeting.txt` →
+  `poc_01M3CNQ2QCW7DBEHDX1CDFJ75N`): create + draft, no clarification → **spec_ready v001**, run
+  `run_01M3CNR078QF82NGAJ92245E0P` (`draft_generate` ~1 m 46 s; start→finish ≈ **3 m 14 s**). Did not
+  build/deploy. **Regression green.**
+
+Both draft runs completed cleanly as root sessions with `draft_finalize` succeeding — the exact step the old
+A2A path destroyed. Every chat turn fast-acked in <60 s; only the background poll turns (multi-step ReAct)
+took longer, and `--stream` carried them without a 504.

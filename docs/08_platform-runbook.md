@@ -18,7 +18,7 @@ Placeholders: `<ctx>` = your CLI context name, `<agent>` = workspace name, `<ws-
 | Every populated `.env` key must exist as a project or workspace secret, or `deploy` stops. | Load secrets first (§3). |
 | New workspaces start with **deny_all** egress on both sandboxes (agent, tool). Base policy allows DNS, in-namespace services and the linked Atlas cluster only. | Any other outbound host (LLM API, third-party API, other Atlas projects) must be allow-listed in `agent.yaml` and redeployed (§7). |
 | "Deployment succeeded / healthy" does **not** mean the agent's graph imported. | Only a successful `agentic invoke` proves it (§6). |
-| An A2A call is a **child execution of the calling turn**; the platform cancels children when the parent turn/session ends or is reclaimed. A2A timeout max **300 s**. | Long background work must not hang off a chat turn as an A2A child. |
+| An A2A call is a **child execution of the calling turn**; the platform cancels children when the parent turn/session ends or is reclaimed. A2A timeout max **300 s**. | Long background work must not hang off a chat turn as an A2A child. **This POC now uses NO A2A cross-agent call at all** — every stage (draft included, as of 2026-09-25) is a top-level invoke; see §8. |
 | The A2A bearer token minted at session start is **not refreshed** (guide: "refresh is not yet implemented"). Observed TTL ≈ 5 min. | A session whose A2A calls span longer than that gets 401 on discovery/invoke. |
 | Playground streaming drops on turns longer than ~60 s; the server-side turn continues. | For long turns use `agentic invoke --stream --timeout 8m`. |
 | A **synchronous** top-level `POST …/invoke` (and CLI without `--stream`) is capped at **~60 s → 504** while the callee's root session runs on to completion. | A callee that reliably runs > ~60 s must be **fired + polled**, not awaited synchronously (§8.5 tier 3). |
@@ -174,7 +174,11 @@ Record a table per agent: destination → sandbox → allowed (Y/N) → proven b
      server-side (proven: a seed coder finished in ~82 s past its caller's 504).
 
    **The rule, in three tiers (apply the cheapest that fits):**
-   - **short in-turn hop that returns within the turn and the ~5-min token → A2A.** (Only chat → draft.)
+   - **short in-turn hop that returns within the turn and the ~5-min token → A2A.** In THIS system there is
+     now **no such hop left** — the draft stage, once the last A2A caller, was moved to tier 3 below because
+     a rich transcript's draft (~4 min) blew the 300 s A2A ceiling and lost the spec when the parent turn
+     was cancelled (docs/06 "Draft stage is now START-AND-POLL"). Every cross-agent call is a top-level
+     invoke. The tier is kept here only as guidance for a genuinely sub-token hop.
    - **work that can outlive the turn or the ~5-min token, but the callee replies in < ~60 s → a
      SYNCHRONOUS top-level invoke** of the callee's workspace via the platform invoke API with a project
      **service account** (`agentic service-account create <name> --role AGENT_DEVELOPER --context <ctx>`;
@@ -191,6 +195,11 @@ Record a table per agent: destination → sandbox → allowed (Y/N) → proven b
      `pocs/{poc}/code/{version}/{component}/`. Proven end to end in the cloud (docs/06 "Fire-and-poll code
      stage"). **Do not mix the two transports for one call** (either synchronous-and-tolerate, or
      fire-and-poll — not both).
+     - **chat → draft is here too** (docs/06 "Draft stage is now START-AND-POLL"): a rich transcript's
+       `draft_generate` runs ~4 min, so chat FIRES the draft workspace (`chat_call_draft` → `_invoke_run`,
+       ~8 s ack) and the Draft Agent registers a `stage:draft` run document (`draft_start_run`) that the user
+       polls with "how's it going?"; `draft_finish_run` closes it succeeded (spec or clarification questions
+       in `outputs`) / failed. Proven in the cloud: DailyDabba draft finalized as a root session in ~5 m 47 s.
 
 ---
 
@@ -199,7 +208,18 @@ Record a table per agent: destination → sandbox → allowed (Y/N) → proven b
 ```bash
 agentic invoke --workspace <agent> --context <ctx> --session <id> --user-id <user> --stream --timeout 8m --file <message.txt>
 ```
-Reuse `--session` for one conversation; `--user-id` is mandatory for agents that stamp user identity. The Playground is good for the trace panel (A2A hops appear as nested subagent nodes) but drops its stream on long turns.
+Reuse `--session` for one conversation; `--user-id` is mandatory for agents that stamp user identity. The Playground is good for the trace panel but drops its stream on long turns.
+
+**Every stage is now START-AND-POLL, so no chat turn does long work — the Playground needs no reload.** Each
+start tool (`chat_call_draft` included) fast-acks in well under a minute (fires a top-level invoke, waits a
+short ack, returns a `run_id`); the specialist runs in its own root session and is polled with "how's it
+going?". So a demo driven from the Playground never has a turn that outlives the stream / the ~60 s cap and
+never needs a page reload to recover a lost turn. (A multi-step *progress* turn — "how's it going?" runs 2–3
+ReAct tool steps — can still take a couple of minutes of LLM round-trips; drive those from the CLI with
+`--stream` if you want to script them, but they never hit a platform ceiling.) Confirmed 2026-09-25 driving
+the draft stage end to end (docs/06 "Draft stage is now START-AND-POLL"): the DailyDabba resume, its
+clarification round, and the recsys regression all fast-acked; only the background poll turns took longer,
+and `--stream` carried them with no 504 and no reload.
 
 ---
 
