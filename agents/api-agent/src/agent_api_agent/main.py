@@ -49,49 +49,59 @@ KNOWN_TOOLS = {"generate_api"}
 def api_execute(envelope_json: str) -> str:
     """Validate a generate_api envelope, load inputs from S3, generate the contract (mode 'contract') or the
     backend (mode 'code'/'repair'), guardrail-scan and upload. Returns a result dict or {"error": {...}}."""
-    from poc_shared_tools import s3 as s3t
+    from poc_shared_tools import metadata as md, s3 as s3t
     from poc_shared_tools.errors import ToolError
     from agent_api_agent import pipeline
+    task_id: str | None = None
     try:
         env = validate("agent_envelope", json.loads(envelope_json))["request"]
+        task_id = env.get("task_id")
         if env["tool"] != "generate_api":
-            return json.dumps({"error": {"code": "BAD_TOOL", "message": env["tool"]}})
-        poc_id, run_id = env["poc_id"], env["run_id"]
-        p = env["params"]
-        code_version = p["code_version"]
-        mode = env.get("mode") or p.get("mode") or "code"
-        ins = p.get("inputs", {})
+            out = {"error": {"code": "BAD_TOOL", "message": env["tool"]}}
+        else:
+            poc_id, run_id = env["poc_id"], env["run_id"]
+            p = env["params"]
+            code_version = p["code_version"]
+            mode = env.get("mode") or p.get("mode") or "code"
+            ins = p.get("inputs", {})
 
-        if mode == "contract":
-            gen_inputs = {
-                "spec": _load_frontmatter(s3t, ins["spec_key"]) if ins.get("spec_key") else {},
-                "schema_design": json.loads(s3t.get_text(ins["schema_key"])),
-                "query_patterns": json.loads(s3t.get_text(ins["query_patterns_key"])),
-            }
-            files, usage = pipeline.generate(gen_inputs, "contract")
-            out = pipeline.write_contract(poc_id, run_id, code_version, files["api_contract.yaml"], AGENT_NAME)
-            return json.dumps({"code_version": code_version, "contract_key": out["key"],
-                               "artifact_kind": "contract", "artifact_key": out["key"], "usage": usage})
-
-        gen_inputs = {
-            "contract_yaml": s3t.get_text(ins["contract_key"]),
-            "schema_design": json.loads(s3t.get_text(ins["schema_key"])) if ins.get("schema_key") else {},
-            "query_patterns": json.loads(s3t.get_text(ins["query_patterns_key"])) if ins.get("query_patterns_key") else None,
-        }
-        failure = p.get("failure")
-        previous_source = _load_prev(s3t, p["previous_source_key"]) if (mode == "repair" and p.get("previous_source_key")) else None
-        files, usage = pipeline.generate(gen_inputs, mode, failure=failure, previous_source=previous_source)
-        out = pipeline.write_component(poc_id, run_id, code_version, files, AGENT_NAME)
-        return json.dumps({"code_version": code_version, "component": pipeline.COMPONENT,
-                           "artifact_kind": "code", "artifact_key": out["prefix"], "usage": usage})
+            if mode == "contract":
+                gen_inputs = {
+                    "spec": _load_frontmatter(s3t, ins["spec_key"]) if ins.get("spec_key") else {},
+                    "schema_design": json.loads(s3t.get_text(ins["schema_key"])),
+                    "query_patterns": json.loads(s3t.get_text(ins["query_patterns_key"])),
+                }
+                files, usage = pipeline.generate(gen_inputs, "contract")
+                written = pipeline.write_contract(poc_id, run_id, code_version, files["api_contract.yaml"], AGENT_NAME)
+                out = {"code_version": code_version, "contract_key": written["key"],
+                       "artifact_kind": "contract", "artifact_key": written["key"], "usage": usage}
+            else:
+                gen_inputs = {
+                    "contract_yaml": s3t.get_text(ins["contract_key"]),
+                    "schema_design": json.loads(s3t.get_text(ins["schema_key"])) if ins.get("schema_key") else {},
+                    "query_patterns": json.loads(s3t.get_text(ins["query_patterns_key"])) if ins.get("query_patterns_key") else None,
+                }
+                failure = p.get("failure")
+                previous_source = _load_prev(s3t, p["previous_source_key"]) if (mode == "repair" and p.get("previous_source_key")) else None
+                files, usage = pipeline.generate(gen_inputs, mode, failure=failure, previous_source=previous_source)
+                written = pipeline.write_component(poc_id, run_id, code_version, files, AGENT_NAME)
+                out = {"code_version": code_version, "component": pipeline.COMPONENT,
+                       "artifact_kind": "code", "artifact_key": written["prefix"], "usage": usage}
     except (ContractError, KeyError, ValueError) as e:
-        return json.dumps({"error": {"code": "INVALID_ENVELOPE", "message": str(e)[:500]}})
+        out = {"error": {"code": "INVALID_ENVELOPE", "message": str(e)[:500]}}
     except pipeline.LLMOutputInvalid as e:
-        return json.dumps({"error": {"code": "LLM_OUTPUT_INVALID", "message": str(e)[:500], "detail": {"errors": e.errors}}})
+        out = {"error": {"code": "LLM_OUTPUT_INVALID", "message": str(e)[:500], "detail": {"errors": e.errors}}}
     except ToolError as e:
-        return json.dumps({"error": {"code": e.code, "message": str(e)[:1500], "retryable": e.retryable}})
+        out = {"error": {"code": e.code, "message": str(e)[:1500], "retryable": e.retryable}}
     except Exception as e:
-        return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}})
+        out = {"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}}
+    # Mark our own task in the platform DB (own root session, started via a top-level invoke): the
+    # orchestrator disconnected at the ~60s gateway cap and polls this task for the outcome.
+    if "error" in out:
+        md.mark_coder_task(task_id, "failed", error=out["error"])
+    else:
+        md.mark_coder_task(task_id, "succeeded", output_ref=out.get("artifact_key"), token_usage=out.get("usage"))
+    return json.dumps(out)
 
 
 def _load_frontmatter(s3t: Any, spec_key: str) -> dict[str, Any]:

@@ -188,6 +188,21 @@ def test_graph_backend_mode(fake_io, monkeypatch):
     assert resp["artifacts"][0]["kind"] == "code"
 
 
+def test_graph_marks_own_task_done(fake_io, monkeypatch):
+    """The coder runs in its own root session and marks its task done in the platform DB so the orchestrator
+    — disconnected by the ~60s gateway cap — can poll the outcome (here for a contract build)."""
+    monkeypatch.setattr(pipeline, "generate",
+                        lambda *a, **k: ({"api_contract.yaml": CONTRACT_YAML}, {"input_tokens": 1, "output_tokens": 1}))
+    marks = []
+    import poc_shared_tools.metadata as md
+    monkeypatch.setattr(md, "mark_coder_task",
+                        lambda task_id, status, output_ref=None, token_usage=None, error=None: marks.append((task_id, status, output_ref)))
+    resp = _invoke({"poc_id": POC, "code_version": "v001",
+                    "inputs": {"spec_key": f"pocs/{POC}/spec/v001/poc_spec.md", "schema_key": "k", "query_patterns_key": "k"}}, "contract")
+    assert resp["status"] == "succeeded", resp
+    assert marks == [(TASK, "succeeded", f"pocs/{POC}/code/v001/api_contract.yaml")]
+
+
 def test_graph_invalid_envelope():
     graph = m.build_agent()
     out = graph.invoke({"messages": [HumanMessage(content="not json")]}, config={"configurable": {"thread_id": "t2"}})

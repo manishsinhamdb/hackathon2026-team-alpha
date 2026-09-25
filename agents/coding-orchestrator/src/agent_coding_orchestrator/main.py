@@ -8,10 +8,19 @@ every reply is an AgentEnvelope response (JSON). Tools:
 
 For start/repair the graph runs the three coder agents (skills generate-api / generate-seed /
 generate-frontend) in order — contract → seed → backend → frontend — assembles the versioned bundle and
-finalizes. Each coder is called SYNCHRONOUSLY as a TOP-LEVEL platform invocation (its own root session with a
-fresh token), not an A2A child, because a full 4-coder run (~6 min) outlives the ~5-min OE A2A token. Each
-call is one task and one run step. The orchestrator replies `succeeded` at the END; a caller whose own call
-times out should find the run by {"stage":"code","poc_id":...} newest first and poll it.
+finalizes.
+
+Each coder is STARTED as a TOP-LEVEL platform invocation (its own root session with a fresh token), not an
+A2A child, and then POLLED for completion — a fire-and-poll pattern. Two platform caps force this: (1) a full
+4-coder run (~6 min) outlives the ~5-min OE A2A token, so A2A is out; (2) the synchronous invoke gateway
+caps a turn at ~60 s and returns 504 while the callee keeps running to completion (a seed coder took 82 s
+past a 504), so a *synchronous* invoke of a >60 s coder fails caller-side even though the coder succeeds.
+So the orchestrator opens one task per coder (orch_begin_task), FIRES the coder with a short client timeout
+(504/timeout == "started"), and then polls that task document (orch_task_status) — the coder marks its own
+task done/failed in the platform DB from its root session when it finishes. Poll interval ~10 s, per-coder
+ceiling 15 min; a coder that never completes fails the run with a clear CODER_TIMEOUT report. Each coder is
+one task and one run step. The orchestrator replies `succeeded` at the END; a caller whose own call times
+out should find the run by {"stage":"code","poc_id":...} newest first and poll it.
 
     RUNNER_MODE=aer   -> LangGraph execution (this graph)
     RUNNER_MODE=tool  -> Tool functions below
@@ -46,10 +55,14 @@ app = App(app_name=APP_NAME)
 logger.info("✅ App created")
 
 STACK = {"backend": "node-express", "frontend": "react-vite", "database": "mongodb"}
-# Coders are called as TOP-LEVEL platform invocations (each its own root session with a fresh token), not
-# A2A children, because a full code run (4 coders) outlives the ~5-min OE A2A token. The call is synchronous
-# — it blocks for the coder's whole reply (~35-70 s) — so the client timeout is generous.
-CODER_INVOKE_TIMEOUT_S = 900
+# Coders are STARTED as TOP-LEVEL platform invocations (each its own root session with a fresh token), not
+# A2A children (a full 4-coder run outlives the ~5-min OE A2A token), and then POLLED — the synchronous
+# invoke gateway 504s at ~60 s while a coder (seed reliably ~80 s) keeps running to completion, so a
+# synchronous wait fails caller-side. We fire with a short client timeout (a 504/timeout means "started",
+# the coder runs on server-side), then poll the coder's task document, which the coder marks done/failed.
+CODER_START_TIMEOUT_S = 25       # short: disconnect well before the ~60s gateway cap; the coder runs on
+CODER_POLL_INTERVAL_S = 10       # seconds between task-status polls
+CODER_POLL_CEILING_S = 15 * 60   # per-coder ceiling; a coder that never completes fails the run
 
 
 # =============================================================================
@@ -156,6 +169,21 @@ def orch_end_task(run_id: str, task_id: str, step: str, status: str, artifact_ke
         field = "outputs.contract_key" if produces == "contract" else f"outputs.component_keys.{step}"
         md._db().runs.update_one({"run_id": run_id}, {"$set": {field: artifact_key, "updated_at": md.now()}})
     return json.dumps({"ok": True})
+
+
+@app.tool(timeout=30)
+def orch_task_status(task_id: str) -> str:
+    """Read one coder task the coder marks in its own root session (fire-and-poll). Returns
+    {"status", "output_ref", "error", "usage"}; a still-running or not-yet-created task is reported
+    running (never an error) so the poll loop keeps waiting until its ceiling."""
+    from poc_shared_tools import metadata as md
+    from poc_shared_tools.errors import ToolError
+    try:
+        t = md.get_task(task_id)
+    except ToolError:
+        return json.dumps({"status": "running", "output_ref": "", "error": None, "usage": None})
+    return json.dumps({"status": t.get("status", "running"), "output_ref": t.get("output_ref", ""),
+                       "error": t.get("error"), "usage": t.get("token_usage")})
 
 
 @app.tool(timeout=600)
@@ -326,24 +354,48 @@ def build_agent() -> CompiledStateGraph:
             env = Envelope.request(poc_id=poc_id, run_id=run_id, caller=AGENT_NAME, agent=step["agent"],
                                    tool=step["tool"], mode=step["mode"], params=params, task_id=task_id,
                                    trace_id=req.get("trace_id"))
-            # TOP-LEVEL synchronous invoke of the coder workspace (its own root session, fresh token), not an
-            # A2A child: a full 4-coder run outlives the ~5-min OE A2A token, which 401'd the last coder.
+            # FIRE: start the coder as a TOP-LEVEL invoke (its own root session, fresh token) and disconnect
+            # before the ~60s gateway cap; a 504/timeout means "started" and the coder runs on server-side. A
+            # non-504 error status is a real start failure. The coder marks task_id done/failed in the DB.
             try:
-                resp = platform_invoke.invoke_envelope(
-                    step["skill"], env, user_id=user_id, session_id=f"code-{run_id}-{step['step']}",
-                    timeout_s=CODER_INVOKE_TIMEOUT_S)["response"]
+                platform_invoke.start_invoke(step["skill"], env, user_id=user_id,
+                                             session_id=f"code-{run_id}-{step['step']}",
+                                             client_timeout_s=CODER_START_TIMEOUT_S)
             except Exception as e:
                 call("orch_end_task", run_id=run_id, task_id=task_id, step=step["step"], status="failed")
-                return _fail_run(state, "CODER_UNAVAILABLE", f"{step['step']} call failed: {str(e)[:300]}")
-            if resp.get("status") != "succeeded":
-                err = resp.get("error", {})
-                call("orch_end_task", run_id=run_id, task_id=task_id, step=step["step"], status="failed")
-                return _fail_run(state, err.get("code", "CODER_FAILED"), f"{step['step']}: {err.get('message', 'coder did not succeed')}")
-            arts = resp.get("artifacts", [])
-            artifact_key = arts[0]["key"] if arts else ""
-            call("orch_end_task", run_id=run_id, task_id=task_id, step=step["step"], status="succeeded",
-                 artifact_key=artifact_key, produces=step["produces"], usage_json=json.dumps(resp.get("usage") or {}))
+                return _fail_run(state, "CODER_UNAVAILABLE", f"{step['step']} start failed: {str(e)[:300]}")
+
+            # POLL the coder's task document until it is marked done/failed (or the per-coder ceiling).
+            outcome = _poll_coder_task(task_id)
+            if outcome["status"] == "succeeded":
+                call("orch_end_task", run_id=run_id, task_id=task_id, step=step["step"], status="succeeded",
+                     artifact_key=outcome.get("output_ref", ""), produces=step["produces"],
+                     usage_json=json.dumps(outcome.get("usage") or {}))
+                continue
+            call("orch_end_task", run_id=run_id, task_id=task_id, step=step["step"], status="failed")
+            if outcome["status"] == "timeout":
+                return _fail_run(state, "CODER_TIMEOUT",
+                                 f"{step['step']} did not complete within {CODER_POLL_CEILING_S}s")
+            err = outcome.get("error") or {}
+            return _fail_run(state, err.get("code", "CODER_FAILED"),
+                             f"{step['step']}: {err.get('message', 'coder did not succeed')}")
         return {}
+
+    def _poll_coder_task(task_id: str) -> dict[str, Any]:
+        """Poll the coder's task document (which the coder marks in its own root session) until it is
+        succeeded/failed or the per-coder ceiling elapses. Returns {"status": succeeded|failed|timeout, ...}.
+        Polls first, then sleeps, so an already-finished (fast) coder returns without waiting."""
+        deadline = time.time() + CODER_POLL_CEILING_S
+        while True:
+            ts = call("orch_task_status", task_id=task_id)
+            st = ts.get("status")
+            if st == "succeeded":
+                return {"status": "succeeded", "output_ref": ts.get("output_ref", ""), "usage": ts.get("usage")}
+            if st == "failed":
+                return {"status": "failed", "error": ts.get("error")}
+            if time.time() >= deadline:
+                return {"status": "timeout"}
+            time.sleep(CODER_POLL_INTERVAL_S)
 
     def assemble_node(state: OrchState) -> dict[str, Any]:
         if state.get("done"):

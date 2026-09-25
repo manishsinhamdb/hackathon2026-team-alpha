@@ -50,40 +50,50 @@ KNOWN_TOOLS = {"generate_seed"}
 def seed_execute(envelope_json: str) -> str:
     """Validate the generate_seed envelope, load inputs from S3, generate the seed component,
     guardrail-scan and upload it. Returns {"code_version", "component", "artifact_key", "usage"} or {"error": {...}}."""
-    from poc_shared_tools import s3 as s3t
+    from poc_shared_tools import metadata as md, s3 as s3t
     from poc_shared_tools.errors import ToolError
     from agent_data_seeding_agent import pipeline
+    task_id: str | None = None
     try:
         env = validate("agent_envelope", json.loads(envelope_json))["request"]
+        task_id = env.get("task_id")
         if env["tool"] != "generate_seed":
-            return json.dumps({"error": {"code": "BAD_TOOL", "message": env["tool"]}})
-        poc_id, run_id = env["poc_id"], env["run_id"]
-        p = env["params"]
-        code_version = p["code_version"]
-        mode = env.get("mode") or p.get("mode") or "code"
-        ins = p.get("inputs", {})
+            out = {"error": {"code": "BAD_TOOL", "message": env["tool"]}}
+        else:
+            poc_id, run_id = env["poc_id"], env["run_id"]
+            p = env["params"]
+            code_version = p["code_version"]
+            mode = env.get("mode") or p.get("mode") or "code"
+            ins = p.get("inputs", {})
 
-        schema_design = json.loads(s3t.get_text(ins["schema_key"]))
-        query_patterns = json.loads(s3t.get_text(ins["query_patterns_key"])) if ins.get("query_patterns_key") else None
-        gen_inputs = {"schema_design": schema_design, "query_patterns": query_patterns}
+            schema_design = json.loads(s3t.get_text(ins["schema_key"]))
+            query_patterns = json.loads(s3t.get_text(ins["query_patterns_key"])) if ins.get("query_patterns_key") else None
+            gen_inputs = {"schema_design": schema_design, "query_patterns": query_patterns}
 
-        failure = p.get("failure")
-        previous_source = None
-        if mode == "repair" and p.get("previous_source_key"):
-            previous_source = _load_prev(s3t, p["previous_source_key"])
+            failure = p.get("failure")
+            previous_source = None
+            if mode == "repair" and p.get("previous_source_key"):
+                previous_source = _load_prev(s3t, p["previous_source_key"])
 
-        files, usage = pipeline.generate(gen_inputs, mode, failure=failure, previous_source=previous_source)
-        out = pipeline.write_component(poc_id, run_id, code_version, files, AGENT_NAME)
-        return json.dumps({"code_version": code_version, "component": pipeline.COMPONENT,
-                           "artifact_key": out["prefix"], "usage": usage})
+            files, usage = pipeline.generate(gen_inputs, mode, failure=failure, previous_source=previous_source)
+            written = pipeline.write_component(poc_id, run_id, code_version, files, AGENT_NAME)
+            out = {"code_version": code_version, "component": pipeline.COMPONENT,
+                   "artifact_key": written["prefix"], "usage": usage}
     except (ContractError, KeyError, ValueError) as e:
-        return json.dumps({"error": {"code": "INVALID_ENVELOPE", "message": str(e)[:500]}})
+        out = {"error": {"code": "INVALID_ENVELOPE", "message": str(e)[:500]}}
     except pipeline.LLMOutputInvalid as e:
-        return json.dumps({"error": {"code": "LLM_OUTPUT_INVALID", "message": str(e)[:500], "detail": {"errors": e.errors}}})
+        out = {"error": {"code": "LLM_OUTPUT_INVALID", "message": str(e)[:500], "detail": {"errors": e.errors}}}
     except ToolError as e:
-        return json.dumps({"error": {"code": e.code, "message": str(e)[:1500], "retryable": e.retryable}})
+        out = {"error": {"code": e.code, "message": str(e)[:1500], "retryable": e.retryable}}
     except Exception as e:
-        return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}})
+        out = {"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}}
+    # Mark our own task in the platform DB (this is our own root session, started via a top-level invoke): the
+    # orchestrator disconnected at the ~60s gateway cap and polls this task for the outcome.
+    if "error" in out:
+        md.mark_coder_task(task_id, "failed", error=out["error"])
+    else:
+        md.mark_coder_task(task_id, "succeeded", output_ref=out.get("artifact_key"), token_usage=out.get("usage"))
+    return json.dumps(out)
 
 
 def _load_prev(s3t: Any, prefix: str) -> dict[str, str]:

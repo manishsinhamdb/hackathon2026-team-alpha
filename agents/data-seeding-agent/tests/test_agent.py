@@ -130,6 +130,19 @@ def test_graph_generate_seed_succeeds(fake_io):
     assert resp["artifacts"][0]["key"].endswith("/seed/")
 
 
+def test_graph_marks_own_task_done(fake_io, monkeypatch):
+    """The coder runs in its own root session (top-level invoke) and marks its task done in the platform DB
+    so the orchestrator — disconnected by the ~60s gateway cap — can poll the outcome."""
+    marks = []
+    import poc_shared_tools.metadata as md
+    monkeypatch.setattr(md, "mark_coder_task",
+                        lambda task_id, status, output_ref=None, token_usage=None, error=None: marks.append((task_id, status, output_ref)))
+    resp = _invoke("generate_seed", {"poc_id": POC, "code_version": "v001",
+                                     "inputs": {"schema_key": f"pocs/{POC}/spec/v001/schema_design.json"}})
+    assert resp["status"] == "succeeded", resp
+    assert marks == [(TASK, "succeeded", f"pocs/{POC}/code/v001/seed/")]
+
+
 def test_graph_bad_tool():
     resp = _invoke("nope", {"poc_id": POC})
     assert resp["status"] == "failed" and resp["error"]["code"] == "BAD_TOOL"

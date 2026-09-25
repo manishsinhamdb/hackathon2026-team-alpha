@@ -4,6 +4,7 @@ Every write uses $set/$push with updated_at. create_run enforces one running
 run per (poc_id, stage) via a partial unique index. Documents are validated
 against poc_contracts on create.
 """
+import logging
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
@@ -18,6 +19,8 @@ from .errors import ToolError
 
 STAGES = ("draft", "code", "deploy", "test", "teardown")
 GATE_FOR_STAGE = {"code": "spec_approved", "deploy": "code_approved"}
+
+_log = logging.getLogger(__name__)
 
 
 def now() -> str:
@@ -211,17 +214,42 @@ def create_task(run_id: str, poc_id: str, agent: str, tool: str, mode: str | Non
     return doc
 
 
+def get_task(task_id: str) -> dict[str, Any]:
+    doc = _strip(_db().tasks.find_one({"task_id": task_id}))
+    if not doc:
+        raise ToolError("TASK_NOT_FOUND", f"no task {task_id}")
+    return doc
+
+
 def finish_task(task_id: str, status: str, output_ref: str | None = None, duration_ms: int | None = None,
-                token_usage: dict[str, int] | None = None) -> None:
+                token_usage: dict[str, int] | None = None, error: dict[str, Any] | None = None) -> None:
     upd: dict[str, Any] = {"status": status, "ended_at": now(), "updated_at": now()}
     if output_ref: upd["output_ref"] = output_ref
     if duration_ms is not None: upd["duration_ms"] = duration_ms
     if token_usage: upd["token_usage"] = token_usage
+    # A coder marks its own task done/failed in its root session so the orchestrator can poll it after the
+    # ~60s synchronous-invoke gateway cap disconnects the caller. `error` carries the coder's failure detail
+    # (not part of the task_document schema, which is only validated on create — a bare $set is fine).
+    if error: upd["error"] = error
     _db().tasks.update_one({"task_id": task_id}, {"$set": upd})
 
 
 def list_tasks(run_id: str) -> list[dict[str, Any]]:
     return [_strip(d) for d in _db().tasks.find({"run_id": run_id}).sort("seq", ASCENDING)]
+
+
+def mark_coder_task(task_id: str | None, status: str, output_ref: str | None = None,
+                    token_usage: dict[str, int] | None = None, error: dict[str, Any] | None = None) -> None:
+    """Best-effort: a coder marks ITS OWN task done/failed from its root session so the orchestrator — which
+    the ~60s synchronous-invoke gateway cap disconnects while the coder runs on — can poll the outcome. A DB
+    hiccup here must NOT fail the coder (it already produced its artifact); the orchestrator's poll ceiling
+    covers a missed marking. No task_id (e.g. a malformed envelope) → nothing to mark."""
+    if not task_id:
+        return
+    try:
+        finish_task(task_id, status, output_ref=output_ref, token_usage=token_usage, error=error)
+    except Exception as e:  # noqa: BLE001 — best-effort, never surface a marking failure to the coder
+        _log.warning("mark_coder_task(%s, %s) failed: %s", task_id, status, e)
 
 
 # ---- conversations ----------------------------------------------------------

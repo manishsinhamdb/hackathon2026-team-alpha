@@ -104,11 +104,23 @@ CHAT_TOPLEVEL_START_TOOLS = ("chat_start_code_run", "chat_start_deploy_run", "ch
 # platform_invoke helper (a top-level invoke — its own root session with a fresh token), never A2A: an A2A
 # call is a child of the calling turn (cancelled when it ends, capped at 300 s) and its OE bearer token
 # expires ~5 min into the run, so a late call in a long run 401s. Only chat -> draft stays A2A.
-GRAPH_PLATFORM_INVOKE_CALLERS = ("coding-orchestrator", "deploy-agent")
+#
+# The REQUIRED platform_invoke entry point differs by caller because of the ~60s synchronous-invoke gateway
+# cap (a 504 while the callee runs on to completion):
+#   - coding-orchestrator -> coders: the seed coder reliably runs >60 s, so a *synchronous* invoke_envelope
+#     504s caller-side even though the coder succeeds. It must FIRE (platform_invoke.start_invoke) and POLL
+#     the coder's task document instead. It must NOT use invoke_envelope for coders.
+#   - deploy-agent -> test/repair: uses the synchronous platform_invoke.invoke_envelope, whose disconnect on
+#     the cap is tolerated by the deploy_find_test_run + poll fallback.
+GRAPH_PLATFORM_INVOKE_CALLERS = {
+    "coding-orchestrator": {"require": ("platform_invoke.start_invoke(",),
+                            "forbid": ("platform_invoke.invoke_envelope(",)},
+    "deploy-agent": {"require": ("platform_invoke.invoke_envelope(",), "forbid": ()},
+}
 
 
 def check_graph_platform_invoke(errors: list[str]) -> None:
-    for name in GRAPH_PLATFORM_INVOKE_CALLERS:
+    for name, rules in GRAPH_PLATFORM_INVOKE_CALLERS.items():
         main_py = ROOT / "agents" / name / "src" / _module_dir(name) / "main.py"
         rel = f"agents/{name}/main.py"
         if not main_py.is_file():
@@ -118,9 +130,14 @@ def check_graph_platform_invoke(errors: list[str]) -> None:
         if "platform_invoke" not in text:
             errors.append(f"{rel} does not import the shared platform_invoke helper "
                           "(cross-agent calls in a durable graph must use it, not A2A)")
-        if "platform_invoke.invoke_envelope(" not in text:
-            errors.append(f"{rel} must make its cross-agent calls via platform_invoke.invoke_envelope "
-                          "(top-level invoke), not A2A — see docs/06 'Platform execution model'")
+        for needle in rules["require"]:
+            if needle not in text:
+                errors.append(f"{rel} must make its cross-agent calls via {needle} "
+                              "(top-level invoke), not A2A — see docs/06 'Platform execution model'")
+        for needle in rules["forbid"]:
+            if needle in text:
+                errors.append(f"{rel} must NOT use {needle} for its cross-agent call "
+                              "(the ~60s synchronous-invoke cap forces fire-and-poll) — see docs/06")
         for marker in ("A2AClient", ".find_agent(", "invoke_a2a"):
             if marker in text:
                 errors.append(f"{rel} still uses an A2A call path ({marker!r}); a cross-agent call in a "

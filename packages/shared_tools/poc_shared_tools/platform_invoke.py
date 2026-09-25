@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import threading
 import time
 import urllib.error
@@ -206,6 +207,62 @@ def invoke_by_skill(skill: str, message: str, *, session_id: str, user_id: str,
     """resolve_workspace_id(skill) then invoke_workspace(...)."""
     return invoke_workspace(resolve_workspace_id(skill), message,
                             session_id=session_id, user_id=user_id, timeout_s=timeout_s)
+
+
+# --- fire-and-poll start (for callees that run past the ~60s synchronous gateway cap) ----------------------
+
+def start_workspace_invoke(workspace_id: str, message: str, *, session_id: str, user_id: str,
+                           client_timeout_s: float = 25) -> dict[str, Any]:
+    """FIRE a top-level workspace invoke and return quickly WITHOUT waiting for the callee to finish.
+
+    The synchronous invoke gateway caps a turn at ~60 s and returns HTTP 504 while the callee's root session
+    keeps running to completion server-side (confirmed live 2026-09-25: a seed coder finished in 82 s past a
+    504). So for a callee that can exceed ~60 s, the caller must START it and then poll for its result (a run
+    or task document, or an S3 artifact) rather than block on the reply.
+
+    A short `client_timeout_s` disconnects us well before the cap. Return shapes:
+      - {"status": "started", "http": None}  — client-side read timeout (expected: the gateway held the
+        connection open while the callee ran; the run continues server-side);
+      - {"status": "started", "http": 504}   — the gateway returned its ~60 s 504 (same meaning);
+      - {"status": "completed", "http": 200, "response": <unwrapped envelope dict>} — the callee finished
+        within our short window (small/fast calls).
+    Any other HTTP >=400 (a real 4xx, or a non-504 5xx) raises RuntimeError — a genuine start failure."""
+    url = f"{_base_url()}/api/v1/projects/{_project_id()}/workspaces/{workspace_id}/invoke"
+    payload = json.dumps({"message": message, "session_id": session_id, "user_id": user_id}).encode()
+
+    def _post(token: str) -> tuple[int, bytes]:
+        return _http("POST", url, data=payload, timeout=client_timeout_s,
+                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+
+    try:
+        status, raw = _post(get_token())
+        if status == 401:
+            status, raw = _post(get_token(force_refresh=True))
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), (TimeoutError, socket.timeout)):
+            log.info("start invoke to %s disconnected on client timeout — callee runs on server-side", workspace_id)
+            return {"status": "started", "http": None}
+        raise RuntimeError(f"platform start-invoke failed: {e}") from e
+    except (TimeoutError, socket.timeout):
+        log.info("start invoke to %s timed out client-side — callee runs on server-side", workspace_id)
+        return {"status": "started", "http": None}
+    if status == 504:
+        log.info("start invoke to %s returned 504 (~60s gateway cap) — callee runs on server-side", workspace_id)
+        return {"status": "started", "http": 504}
+    if status >= 400:
+        raise RuntimeError(f"platform start-invoke failed: HTTP {status} {raw[:300]!r}")
+    try:
+        return {"status": "completed", "http": status, "response": _unwrap_platform_response(json.loads(raw))}
+    except json.JSONDecodeError:
+        return {"status": "completed", "http": status, "response": {"response": raw.decode("utf-8", "replace")}}
+
+
+def start_invoke(skill: str, envelope: dict[str, Any], *, user_id: str, session_id: str,
+                 client_timeout_s: float = 25) -> dict[str, Any]:
+    """resolve_workspace_id(skill) then start_workspace_invoke(...): FIRE the callee and return once it is
+    started (or completed, if fast). The caller polls a run/task/S3 artifact for the actual result."""
+    return start_workspace_invoke(resolve_workspace_id(skill), json.dumps(envelope),
+                                  session_id=session_id, user_id=user_id, client_timeout_s=client_timeout_s)
 
 
 def invoke_envelope(skill: str, envelope: dict[str, Any], *, user_id: str, session_id: str,
