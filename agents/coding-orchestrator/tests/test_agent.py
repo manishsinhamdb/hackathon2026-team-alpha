@@ -248,3 +248,53 @@ def test_invalid_envelope():
     out = graph.invoke({"messages": [HumanMessage(content="not json")]}, config={"configurable": {"thread_id": "t2"}})
     resp = validate("agent_envelope", json.loads(out["messages"][-1].content))["response"]
     assert resp["status"] == "failed" and resp["error"]["code"] == "INVALID_ENVELOPE"
+
+
+# =============================================================================
+# A2A token refresh on stale discovery (long-run 401 -> re-mint and retry)
+# =============================================================================
+
+def _stub_app_that_refreshes(calls, first_registry, second_registry):
+    """A minimal app whose a2a_tools() returns a discovery tool; the registry it reports depends on how
+    many times a2a_tools() has been called — call 1 mimics an expired token (empty), call 2 the fresh one."""
+    import json as _json
+
+    class _T:
+        def __init__(self, fn, name):
+            self.fn, self.name, self.args = fn, name, {}
+        def invoke(self, call):
+            return self.fn(**(call.get("args", {}) if isinstance(call, dict) else {}))
+
+    class _App:
+        def a2a_tools(self):
+            calls["n"] += 1
+            registry = first_registry if calls["n"] == 1 else second_registry
+
+            def discover_available_agents():
+                return _json.dumps(registry)
+            return [_T(discover_available_agents, "discover_available_agents")]
+    return _App()
+
+
+def test_find_agent_refreshes_token_when_discovery_is_stale():
+    """First discovery is empty (expired A2A token -> 401 -> nothing); find_agent must re-mint the token
+    (a fresh a2a_tools()) and retry, then match. This is the frontend-coder-not-found case on a long run."""
+    from agent_coding_orchestrator.a2a import A2AClient
+    calls = {"n": 0}
+    full = [{"name": "frontend-agent", "id": "ws-fe", "skills": ["generate-frontend"]}]
+    c = A2AClient(_stub_app_that_refreshes(calls, first_registry=[], second_registry=full))
+    agent = c.find_agent("generate-frontend")
+    assert agent["id"] == "ws-fe"
+    assert calls["n"] == 2  # refreshed exactly once after the empty first discovery
+
+
+def test_find_agent_refreshes_only_once_then_raises_for_absent_agent():
+    from agent_coding_orchestrator.a2a import A2AClient
+    calls = {"n": 0}
+    c = A2AClient(_stub_app_that_refreshes(calls, first_registry=[], second_registry=[]))
+    try:
+        c.find_agent("generate-frontend")
+        assert False, "expected RuntimeError for a genuinely absent agent"
+    except RuntimeError as e:
+        assert "generate-frontend" in str(e)
+    assert calls["n"] == 2  # one refresh, then give up

@@ -28,10 +28,20 @@ class A2AClient:
         self.app = app
         self._tools = None
 
-    def _load(self):
-        if self._tools is None:
+    def _load(self, force: bool = False):
+        if force or self._tools is None:
             self._tools = {t.name: t for t in self.app.a2a_tools()}
         return self._tools
+
+    def refresh(self) -> None:
+        """Re-create the A2A tools so the SDK re-mints the orchestrator's OE auth token.
+
+        That token expires roughly 5 minutes into a run (confirmed: /a2a/discover returns 401 on the last
+        coder of a full code run — contract/seed/backend land inside the window, frontend does not). The
+        A2AClient is built once at graph start and _load() caches its tools for the whole run, so the cached
+        token goes stale. Dropping the cache and re-calling app.a2a_tools() forces a fresh token. See
+        docs/06 'Platform execution model' → A2A token lifetime."""
+        self._load(force=True)
 
     def _find(self, *names: str):
         tools = self._load()
@@ -49,11 +59,18 @@ class A2AClient:
             return [{"raw": out}]
         return data if isinstance(data, list) else data.get("agents", [data])
 
-    def find_agent(self, skill_or_name: str) -> dict[str, Any]:
+    def find_agent(self, skill_or_name: str, _allow_refresh: bool = True) -> dict[str, Any]:
         for a in self.discover():
             blob = json.dumps(a).lower()
             if skill_or_name.lower() in blob:
                 return a
+        # No match. On a long run this is almost always the expired-token case: discovery 401'd and returned
+        # nothing. Re-mint the token and try once more before giving up (a genuinely-absent agent still fails).
+        if _allow_refresh:
+            log.warning("no A2A agent matching %r; refreshing the A2A token (it expires ~5 min into a run) "
+                        "and retrying discovery", skill_or_name)
+            self.refresh()
+            return self.find_agent(skill_or_name, _allow_refresh=False)
         raise RuntimeError(f"no A2A agent matching {skill_or_name!r}")
 
     def invoke(self, agent: dict[str, Any], envelope: dict[str, Any], timeout_s: int = 120) -> dict[str, Any]:

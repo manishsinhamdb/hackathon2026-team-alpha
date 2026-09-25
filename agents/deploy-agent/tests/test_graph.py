@@ -179,3 +179,39 @@ def test_get_run_status(fake_md, monkeypatch):
     fake_md.update_run_step(r["run_id"], "check_gate", "succeeded")
     resp = _invoke("get_run_status", {"run_id": r["run_id"]})
     assert resp["status"] == "succeeded" and resp["result"]["steps"] == [{"name": "check_gate", "status": "succeeded"}]
+
+
+# =============================================================================
+# A2A token refresh on stale discovery (long deploy run -> 401 on e2e-tests lookup)
+# =============================================================================
+
+def _stub_app_that_refreshes(calls, first_registry, second_registry):
+    import json as _json
+
+    class _T:
+        def __init__(self, fn, name):
+            self.fn, self.name, self.args = fn, name, {}
+        def invoke(self, call):
+            return self.fn(**(call.get("args", {}) if isinstance(call, dict) else {}))
+
+    class _App:
+        def a2a_tools(self):
+            calls["n"] += 1
+            registry = first_registry if calls["n"] == 1 else second_registry
+
+            def discover_available_agents():
+                return _json.dumps(registry)
+            return [_T(discover_available_agents, "discover_available_agents")]
+    return _App()
+
+
+def test_find_agent_refreshes_token_when_discovery_is_stale():
+    """The deploy agent looks up the test agent ('e2e-tests') at the end of a long run; if the A2A token
+    has expired, the first discovery is empty and find_agent must re-mint and retry before matching."""
+    from agent_deploy_agent.a2a import A2AClient
+    calls = {"n": 0}
+    full = [{"name": "test-agent", "id": "ws-te", "skills": ["e2e-tests"]}]
+    c = A2AClient(_stub_app_that_refreshes(calls, first_registry=[], second_registry=full))
+    agent = c.find_agent("e2e-tests")
+    assert agent["id"] == "ws-te"
+    assert calls["n"] == 2
