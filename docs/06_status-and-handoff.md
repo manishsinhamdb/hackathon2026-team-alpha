@@ -408,8 +408,91 @@ this fallback (`deploy_find_test_run` + poll), so deploy→test is expected to t
 orchestrator→coders needs the change. It was left out because the task fixed orchestrator→coders as a
 *synchronous* call and the guardrail directed stop-and-report over re-architecting.
 
+## Fire-and-poll code stage — PROVEN in the cloud; deploy STOPPED at Atlas 403 (2026-09-25, later run)
+
+The ~60 s synchronous-invoke cap that blocked the code stage in the run above is resolved by re-architecting
+**orchestrator → coders** from a *synchronous* invoke to **fire-and-poll**. This ran the full 4-coder chain
+to completion in the cloud — the first time the code stage has ever finished on the platform.
+
+### Design (`agents/coding-orchestrator`, `poc_shared_tools.platform_invoke`, the three coders)
+
+> **short in-turn hop → A2A; anything that can outlive the turn or the ~5-min A2A token → a top-level
+> platform invoke; anything whose callee runs > ~60 s → FIRE that top-level invoke and POLL for its result
+> (the synchronous invoke gateway 504s at ~60 s while the callee runs on to completion server-side).**
+
+- `platform_invoke.start_invoke` / `start_workspace_invoke`: FIRE a top-level workspace invoke with a short
+  client timeout (`CODER_START_TIMEOUT_S = 25 s`). A client-side read timeout **or** an HTTP 504 both mean
+  `{"status":"started"}` — the callee's root session keeps running server-side; a 200 is a fast completion;
+  any other `>=400` is a real start failure. (`invoke_envelope`, the synchronous helper, is kept for
+  deploy → test / repair, which tolerate the cap via `deploy_find_test_run` + poll.)
+- `coders_node` (envelope contract unchanged): for each coder, `orch_begin_task` opens one task, then
+  `start_invoke` FIRES the coder (its own root session, fresh SA token — no OE-A2A-token expiry), then
+  `_poll_coder_task` polls the coder's task document via the new `orch_task_status` tool every
+  `CODER_POLL_INTERVAL_S = 10 s` up to a per-coder ceiling `CODER_POLL_CEILING_S = 15 min`. A coder that
+  never completes fails the run with a clear **CODER_TIMEOUT** report (no infinite wait).
+- **Each coder marks its OWN task done/failed** in the platform DB from its root session
+  (`metadata.mark_coder_task`, best-effort — a DB blip never fails the coder; the poll ceiling covers a
+  missed marking) — this is the completion signal the disconnected orchestrator polls. `metadata.get_task`
+  added; `finish_task` gained an optional `error` field. The coder uploads its artifact to S3 *before*
+  marking the task succeeded, so a succeeded task always implies the artifact is present for `orch_assemble`.
+- `scripts/check_platform_contract.py`: orchestrator must call `platform_invoke.start_invoke` and must **not**
+  call `invoke_envelope` for coders; deploy-agent still uses `invoke_envelope`; neither references an A2A path.
+- Tests: orchestrator suite covers **"coder returns 504 then completes"** and **"coder never completes →
+  CODER_TIMEOUT"**; each coder asserts it marks its task. All 8 suites green (seed 10 · api 12 · frontend 12 ·
+  orchestrator 12 · chat 14 · deploy 9 · draft 18 · test 11); `check_platform_contract.py` passes.
+
+### Cloud rebuild/redeploy (the 4 changed agents; runner/OE 0.11.1, HEAD fc4218a)
+
+| agent | build id | deployment id |
+|-------|----------|---------------|
+| coding-orchestrator | `bld_01M3CADX1XBRYX5K8AWEXMVX30` | `deploy-51a4463e` |
+| api-agent | `bld_01M3CAE1C7YFNGQ9NJVE512RK1` | `deploy-1f5e98f6` |
+| data-seeding-agent | `bld_01M3CAE61G4TV44AVYFSRHYF96` | `deploy-1461c171` |
+| frontend-agent | `bld_01M3CAEACSZBDPEPXDWC487DEN` | `deploy-a7b3ea4c` |
+
+All four re-invoke-proven (`INVALID_ENVELOPE` AgentEnvelope = graph imported).
+
+### Live happy-path run (deployed chat agent, `--stream`; POC `poc_01M3CAZCBNS6FX5G5CB297J2TP`, spec v001)
+
+- **transcript → spec v001** (chat → draft A2A + summarise): completed cleanly over `--stream`, no 504.
+- **CODE STAGE — SUCCEEDED**, run `run_01M3CBCF1HNNKD1QNCDCMRZPH6`, code **v001**, ~7 m 51 s
+  (13:17:14 → 13:25:05Z). Every coder logged `start invoke to <ws> timed out client-side — callee runs on
+  server-side` (~25 s fire disconnect) and then completed via task-poll — i.e. **every coder ran past the
+  ~60 s cap**, and the whole run ran **past the ~5-min A2A token** (the frontend coder, which used to 401 on
+  the expired OE token, succeeded). `orch_finalize success` at 13:25:05.
+
+  | coder | workspace | began | task done | ~duration |
+  |-------|-----------|-------|-----------|-----------|
+  | contract | api-agent (`…ae5`) | 13:17:14 | 13:18:29 | ~1 m 15 s |
+  | seed | data-seeding (`…248`) | 13:18:32 | 13:20:21 | ~1 m 49 s |
+  | backend | api-agent (`…ae5`) | 13:20:24 | 13:22:12 | ~1 m 48 s |
+  | frontend | frontend (`…24a`) | 13:22:15 | 13:24:25 | ~2 m 10 s |
+  | assemble | (orchestrator) | — | 13:24:55 | 18.3 s |
+
+  Chat confirmed `code_ready` (contract + seed + backend + frontend, all code v001).
+
+- **DEPLOY STAGE — BLOCKED (STOPPED per guardrail)**, run `run_01M3CC1MKNKB2PCVEHZX6W04FS`. Failed at the
+  **first** pipeline step `provision_db` with `ATLAS_API_ERROR 403 IP_ADDRESS_NOT_ON_ACCESS_LIST` for the
+  deploy-runner egress IP **`54.227.181.25`** — a NEW IP, not the previously-recorded `104.30.164.1` nor the
+  data-plane IPs `44.214.209.237` / `52.44.27.64`. Per the task guardrail (Atlas 403 → stop and report; only
+  an Atlas admin can add the IP to the service-account API access list) we stopped.
+  - **No AWS resources were created:** `provision_db` precedes `launch_ec2`, so **no EC2 launched**
+    (`aws ec2 describe-instances` for `msinha-*` in ap-south-1 = empty), the Atlas 403 means no cluster/user
+    was created either, so **`cloud_resources` active count = 0**. Nothing to tear down (0 of the ≤2 EC2
+    budget used). No test report (`run_tests` never reached; 9/9 remains the expectation for this spec once
+    deploy is unblocked).
+
+**Bottom line:** the fire-and-poll transport change is the fix — the code stage now completes in the cloud
+end to end. The only thing between here and a full teardown-proof happy path is the **Atlas API access-list
+403**, which is an operator/Atlas-admin action, not a code change.
+
 ## Remaining plan
 
+0. **Allowlist `54.227.181.25` (the deploy-runner egress IP) on the Atlas service-account API access list**
+   (or `0.0.0.0/0` for the POC). Then re-run the deploy turn through chat (`"Deploy it, I don't need to
+   review the code"` on POC `poc_01M3CAZCBNS6FX5G5CB297J2TP`, or `resume_run` `run_01M3CC1MKNKB2PCVEHZX6W04FS`)
+   → deployed (one msinha- EC2) → tested (9/9) → `"Tear it down"` → torn_down, cloud_resources 0. The code
+   stage needs no further work.
 1. **Allowlist the egress IP on the Atlas API access list** (unblocks all Atlas ops), then re-run the
    deploy turn through chat (or `resume_run` the failed deploy run) → deployed → tested → torn_down; and
    re-run the golden teardown to clear its last 2 Atlas entries.

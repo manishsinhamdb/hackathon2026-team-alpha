@@ -21,6 +21,7 @@ Placeholders: `<ctx>` = your CLI context name, `<agent>` = workspace name, `<ws-
 | An A2A call is a **child execution of the calling turn**; the platform cancels children when the parent turn/session ends or is reclaimed. A2A timeout max **300 s**. | Long background work must not hang off a chat turn as an A2A child. |
 | The A2A bearer token minted at session start is **not refreshed** (guide: "refresh is not yet implemented"). Observed TTL ≈ 5 min. | A session whose A2A calls span longer than that gets 401 on discovery/invoke. |
 | Playground streaming drops on turns longer than ~60 s; the server-side turn continues. | For long turns use `agentic invoke --stream --timeout 8m`. |
+| A **synchronous** top-level `POST …/invoke` (and CLI without `--stream`) is capped at **~60 s → 504** while the callee's root session runs on to completion. | A callee that reliably runs > ~60 s must be **fired + polled**, not awaited synchronously (§8.5 tier 3). |
 | Log ingestion lags 30–90 s. | Wait before concluding "no logs". |
 
 ---
@@ -167,8 +168,29 @@ Record a table per agent: destination → sandbox → allowed (Y/N) → proven b
 5. Design limits (from §0), and the rule that follows:
    - a child A2A execution dies with the parent turn — never fire-and-forget a long callee from a chat turn;
    - each A2A call ≤ 300 s;
-   - the caller's A2A token expires after ~5 min and is not refreshed.
-   **Rule:** if the calling session can outlive the token, or the work outlives the turn, start it as a **top-level invocation** of the callee's workspace through the platform invoke API with a project **service account** (`agentic service-account create <name> --role AGENT_DEVELOPER --context <ctx>`; token at `POST /api/v1/oauth/token`, client-credentials; invoke at `POST /api/v1/projects/<project>/workspaces/<ws-id>/invoke` with `{message, session_id, user_id}`), and keep A2A for short in-turn hops.
+   - the caller's A2A token expires after ~5 min and is not refreshed;
+   - a **synchronous** top-level invoke (the HTTP `POST …/invoke`, the CLI without `--stream`, the Playground)
+     is capped at **~60 s** and returns **504** while the callee's root session keeps running to completion
+     server-side (proven: a seed coder finished in ~82 s past its caller's 504).
+
+   **The rule, in three tiers (apply the cheapest that fits):**
+   - **short in-turn hop that returns within the turn and the ~5-min token → A2A.** (Only chat → draft.)
+   - **work that can outlive the turn or the ~5-min token, but the callee replies in < ~60 s → a
+     SYNCHRONOUS top-level invoke** of the callee's workspace via the platform invoke API with a project
+     **service account** (`agentic service-account create <name> --role AGENT_DEVELOPER --context <ctx>`;
+     token at `POST /api/v1/oauth/token`, client-credentials; invoke at
+     `POST /api/v1/projects/<project>/workspaces/<ws-id>/invoke` with `{message, session_id, user_id}`). The
+     callee runs in its own root session with a fresh token. Tolerate the ~60 s cap either by keeping the
+     callee under it, or by having the callee create a run/task document its caller can poll on a 504
+     (deploy → test: `deploy_find_test_run` + poll).
+   - **work whose callee reliably runs > ~60 s → FIRE that top-level invoke and POLL for the result.** Start
+     it with a short client timeout (`platform_invoke.start_invoke`: a client timeout or 504 == "started"),
+     then poll a durable signal until done or a ceiling: a run/task document (orchestrator → coders: each
+     coder marks its own task via `metadata.mark_coder_task`, the orchestrator polls `orch_task_status`,
+     ~10 s interval / 15-min ceiling / clear `CODER_TIMEOUT` on ceiling) or an S3 artifact prefix
+     `pocs/{poc}/code/{version}/{component}/`. Proven end to end in the cloud (docs/06 "Fire-and-poll code
+     stage"). **Do not mix the two transports for one call** (either synchronous-and-tolerate, or
+     fire-and-poll — not both).
 
 ---
 
