@@ -159,6 +159,83 @@ each fixed with a test:
   `test_publish_frontend_urls_use_public_dns`. NB: the delivered e2e run was deployed just before this fix so
   its recorded URLs are IP-based; the fix applies to subsequent deploys.
 
+## Platform 0.11.1 migration (2026-09-25)
+
+The platform runner/OE was upgraded to **0.11.1**, which **renamed the SDK distributions** and their
+top-level modules. Every deployed pod failed at import with
+`No module named 'magenta_sdklanggraph'`. The CLI (agentic **0.1.101-alpha**, runner-base 0.1.101-alpha)
+still ships the OLD SDK (`magenta_sdklanggraph` 0.0.89) locally, so the cloud was ahead of the CLI.
+
+**The module name (established empirically, not guessed).** Local containers only had the old SDK and
+the platform ECR account (`867958226915`) is not readable with our POC-builder keys, so the truth was
+recovered by deploying a probe that **raises a `RuntimeError` at import time** whose message enumerates
+the installed distributions, their site-packages module dirs, and each module's public `dir()`. Import
+exceptions are logged verbatim by the runner (`Failed to import module 'agent_<x>.main': <message>`), so
+the answer came back in `agentic logs`. Result:
+
+| old (0.0.89) dist / module          | new (0.11.1) dist / module                    |
+|-------------------------------------|-----------------------------------------------|
+| `magenta-sdklanggraph` / `magenta_sdklanggraph` | `agent-engine-sdk-langgraph` / **`agent_engine_sdk_langgraph`** |
+| `magenta-sdk-core` / `magenta_sdk_core`         | `agent-engine-sdk` / `agent_engine_sdk` (has `BaseApp`) |
+| `runner-shared` / `runner_shared`               | `agent-engine-runner-shared` / `agent_engine_runner_shared` |
+| — (new)                                          | `agent-engine-sdk-memory` / `agent_engine_sdk_memory` |
+
+**API differences: none.** `agent_engine_sdk_langgraph`'s public surface is **byte-identical** to the old
+`magenta_sdklanggraph` — same `App` (with `tool`, `get_tools`, `a2a_tools`, `entrypoint`, `checkpointer`,
+`run`, `memory`, `llm`, `get_current_user_id`), same `Memory`, `PlatformCheckpointer`, `secure_llm`,
+`durable_*`, etc. The A2A helpers `find_agent` / `invoke_a2a_agent` are **our own** wrappers in each
+agent's `a2a.py` (over `app.a2a_tools()`), not SDK imports, so they were untouched. The migration is
+therefore purely a **module-import rename** plus the sandbox-layout change.
+
+**What changed (all 8 agents):**
+- `main.py`: `from magenta_sdklanggraph import App` → `from agent_engine_sdk_langgraph import App`.
+- `tests/conftest.py`: the fake SDK is registered under `sys.modules["agent_engine_sdk_langgraph"]`.
+- `agent.yaml`: ran `agentic migrate sandboxes` in each agent dir — it moved the top-level
+  `network: {egress_mode: allow_all}` **into each sandbox profile** (`agent` + `tool`), reindented to
+  2 spaces, and **dropped the `is_local=` placement args** from every `@app.tool(...)` (the sandbox
+  `tools:` lists in agent.yaml are now authoritative for pod placement). It did **not** rename the import.
+- pyproject deps were already correct (`agent-engine-runner-shared[mongodb,tracing]` +
+  `agent-engine-sdk-langgraph`) — the packages resolved fine all along; only the Python import was stale.
+- No try/except shims, no vendored SDK. Per-agent `uv run pytest -q tests` stays green
+  (seed 9 · api 11 · chat 11 · orchestrator 9 · deploy 8 · draft 18 · frontend 11 · test 11).
+
+**Packaging rules kept (do not regress):** protobuf pinned `>=6.33.6,<7` in every pyproject; `uv.lock`
+excluded from the build archive via `.agenticignore` (a shipped lock freezes versions the platform
+packages can't satisfy); `agents/*/.env` are real files omitting the reserved `A2A_JWT_SECRET`; run
+`./scripts/vendor_packages.sh` before every build. `scripts/check_platform_contract.py` asserts all of
+the above (SDK dep lines, import line, sandbox layout) against one canonical definition and is wired into
+CI in `docs/ci/agents-map.yml`.
+
+**Exact commands that worked (context `hackathon2026`, runner/OE 0.11.1):**
+```bash
+# per agent directory, once:
+cd agents/<agent> && agentic migrate sandboxes && cd -
+# before every build:
+./scripts/vendor_packages.sh
+# build (parallel with --no-wait), then deploy (parallel with --no-wait):
+agentic build  --workspace <agent> --context hackathon2026 [--no-wait]
+agentic deploy --workspace <agent> --context hackathon2026 [--no-wait]
+# a healthy status is NOT proof; only a real invoke reply is:
+agentic invoke --workspace <agent> --context hackathon2026 --json "hello"
+# import failure surfaces as: Error: invoke: The agent did not become ready during startup
+# a successful graph replies with an AgentEnvelope (e.g. INVALID_ENVELOPE for a non-envelope message)
+```
+
+**Result — all 8 deployed and invoke-proven (2026-09-25).** data-seeding, api, frontend,
+coding-orchestrator, test, deploy, draft each return a real `INVALID_ENVELOPE` AgentEnvelope reply
+(graph imported); chat-agent answers "How is it going?" conversationally. Build/deploy ids:
+
+| agent | build id | deployment id |
+|-------|----------|---------------|
+| data-seeding-agent | `bld_01M3BSP4Q77C26H33CJTGJK52M` | `deploy-db3bf360` (r4) |
+| api-agent | `bld_01M3BT0JYCTG1MEFD2KZDTHESV` | `deploy-bb10e645` |
+| frontend-agent | `bld_01M3BT0Q6D3ZPXAX0WFYDY1Z7G` | `deploy-a6d7ce78` |
+| coding-orchestrator | `bld_01M3BT0V7R3M47GK260RZTWZ7D` | `deploy-e206cee1` |
+| test-agent | `bld_01M3BT0ZCW1ZZGV0KXPYBY47ED` | `deploy-1c148488` |
+| deploy-agent | `bld_01M3BT13AW8HPY14BAGM9V5BFV` | `deploy-dc56bad7` |
+| draft-agent | `bld_01M3BT17JTNSXM1JEFB4396AWC` | `deploy-ba524644` |
+| chat-agent | `bld_01M3BT1C1KP0SX71BQCVDAYTB4` | `deploy-029e9402` |
+
 ## Remaining plan
 
 1. **Allowlist the egress IP on the Atlas API access list** (unblocks all Atlas ops), then re-run the
