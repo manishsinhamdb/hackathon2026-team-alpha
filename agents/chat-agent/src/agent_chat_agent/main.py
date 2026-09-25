@@ -237,7 +237,7 @@ def chat_run_tests(poc_id: str, deployment_run_id: str = "") -> str:
     params: dict[str, Any] = {"poc_id": poc_id}
     if deployment_run_id:
         params["deployment_run_id"] = deployment_run_id
-    return json.dumps(_a2a_run("e2e-tests", "test_agent", "run_e2e", poc_id, params, "test"), default=str)
+    return json.dumps(_invoke_run("e2e-tests", "test_agent", "run_e2e", poc_id, params, "test"), default=str)
 
 
 @app.tool(timeout=290)

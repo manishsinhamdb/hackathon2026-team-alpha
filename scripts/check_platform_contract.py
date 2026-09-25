@@ -92,11 +92,39 @@ def check_agent(agent_dir: Path, errors: list[str]) -> None:
             )
 
 
-# Chat-agent stage-start tools that must NOT be started with an A2A child call. On the platform an A2A
-# invocation is a CHILD EXECUTION of the calling turn and is cancelled when the turn ends (and it is capped
-# at 300 s), so a minutes-long stage started that way is killed mid-flight. These must be started with a
-# TOP-LEVEL platform invocation (its own root session) — see docs/06 "Platform execution model".
-CHAT_TOPLEVEL_START_TOOLS = ("chat_start_code_run", "chat_start_deploy_run", "chat_teardown")
+# Chat-agent tools that start/drive a run in another agent and must NOT use an A2A child call. On the
+# platform an A2A invocation is a CHILD EXECUTION of the calling turn and is cancelled when the turn ends
+# (and it is capped at 300 s), so a minutes-long stage started that way is killed mid-flight. These must be
+# started with a TOP-LEVEL platform invocation (its own root session) — see docs/06 "Platform execution
+# model". chat_call_draft is deliberately EXCLUDED: chat -> draft is a short in-turn hop that returns within
+# the turn and the ~5-min A2A token, so it stays on A2A (the one allowed A2A caller).
+CHAT_TOPLEVEL_START_TOOLS = ("chat_start_code_run", "chat_start_deploy_run", "chat_teardown", "chat_run_tests")
+
+# Agents whose durable / long-running graph calls ANOTHER agent. That call must go through the shared
+# platform_invoke helper (a top-level invoke — its own root session with a fresh token), never A2A: an A2A
+# call is a child of the calling turn (cancelled when it ends, capped at 300 s) and its OE bearer token
+# expires ~5 min into the run, so a late call in a long run 401s. Only chat -> draft stays A2A.
+GRAPH_PLATFORM_INVOKE_CALLERS = ("coding-orchestrator", "deploy-agent")
+
+
+def check_graph_platform_invoke(errors: list[str]) -> None:
+    for name in GRAPH_PLATFORM_INVOKE_CALLERS:
+        main_py = ROOT / "agents" / name / "src" / _module_dir(name) / "main.py"
+        rel = f"agents/{name}/main.py"
+        if not main_py.is_file():
+            errors.append(f"{rel} is missing")
+            continue
+        text = main_py.read_text()
+        if "platform_invoke" not in text:
+            errors.append(f"{rel} does not import the shared platform_invoke helper "
+                          "(cross-agent calls in a durable graph must use it, not A2A)")
+        if "platform_invoke.invoke_envelope(" not in text:
+            errors.append(f"{rel} must make its cross-agent calls via platform_invoke.invoke_envelope "
+                          "(top-level invoke), not A2A — see docs/06 'Platform execution model'")
+        for marker in ("A2AClient", ".find_agent(", "invoke_a2a"):
+            if marker in text:
+                errors.append(f"{rel} still uses an A2A call path ({marker!r}); a cross-agent call in a "
+                              "durable/long-running graph must use platform_invoke, not A2A")
 
 
 def check_chat_stage_starts(errors: list[str]) -> None:
@@ -134,6 +162,7 @@ def main() -> int:
     for agent_dir in agent_dirs:
         check_agent(agent_dir, errors)
     check_chat_stage_starts(errors)
+    check_graph_platform_invoke(errors)
 
     if errors:
         print("Platform contract check failed:")
