@@ -3,46 +3,10 @@
 @tailwind utilities;
 
 /*
-  MongoDB-house / Leafygreen palette. Semantic tokens are stored as space-separated RGB *channels*
-  (e.g. `249 251 250`) so Tailwind's `bg-ok/12` opacity modifiers compose via `rgb(var(--ok) / .12)`.
-  Light is the default; the dark block activates under prefers-color-scheme: dark. The near-black ink
-  and green accent are shared; the content surfaces / text scale flip.
+  Control Tower v2 — the approved dark design. A single dark theme (no light round). Fonts come from
+  Google Fonts (<link> in layout.tsx): Sora, IBM Plex Sans, IBM Plex Mono. All colours are the mockup's
+  literal hex; the semantic names live in tailwind.config.ts.
 */
-:root {
-  --canvas: 249 251 250;   /* #f9fbfa app background */
-  --surface: 255 255 255;  /* #ffffff cards / panes */
-  --surface-2: 241 245 244; /* #f1f5f4 subtle raised fills, chips */
-  --line: 225 231 229;     /* #e1e7e5 borders */
-  --content: 0 30 43;      /* #001e2b primary text */
-  --muted: 92 108 117;     /* #5c6c75 secondary text */
-  --faint: 137 151 155;    /* #89979b tertiary / captions */
-  --accent: 0 104 74;      /* #00684a actionable green on light */
-  --ok: 0 163 92;          /* #00a35c */
-  --run: 180 83 9;         /* #b45309 amber-700 */
-  --fail: 192 57 43;       /* #c0392b */
-  --idle: 176 188 191;     /* #b0bcbf */
-  --warn-bg: 255 246 230;  /* #fff6e6 */
-  --warn-line: 240 213 154;/* #f0d59a */
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --canvas: 0 30 43;      /* #001e2b */
-    --surface: 2 52 48;     /* #023430 */
-    --surface-2: 0 53 46;   /* #00352e */
-    --line: 13 74 68;       /* #0d4a44 */
-    --content: 232 240 238; /* #e8f0ee */
-    --muted: 165 182 178;   /* #a5b6b2 */
-    --faint: 125 145 141;   /* #7d918d */
-    --accent: 0 237 100;    /* #00ed64 */
-    --ok: 0 237 100;        /* #00ed64 */
-    --run: 255 200 96;      /* #ffc860 */
-    --fail: 255 105 96;     /* #ff6960 */
-    --idle: 61 91 87;       /* #3d5b57 */
-    --warn-bg: 42 36 16;    /* #2a2410 */
-    --warn-line: 92 77 30;  /* #5c4d1e */
-  }
-}
 
 * { box-sizing: border-box; }
 
@@ -50,69 +14,70 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: rgb(var(--canvas));
-  color: rgb(var(--content));
-  font-family: "Euclid Circular A", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #001E2B;
+  color: #E8EDEB;
+  font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
   -webkit-font-smoothing: antialiased;
 }
 
 /* Thin, quiet scrollbars that suit the dense board. */
-* { scrollbar-width: thin; scrollbar-color: rgb(var(--line)) transparent; }
+* { scrollbar-width: thin; scrollbar-color: #1C2D38 transparent; }
 *::-webkit-scrollbar { width: 8px; height: 8px; }
-*::-webkit-scrollbar-thumb { background: rgb(var(--line)); border-radius: 8px; }
+*::-webkit-scrollbar-thumb { background: #1C2D38; border-radius: 8px; }
 
-/* --- Rendered markdown inside chat bubbles --------------------------------------------------------- */
-.md { font-size: 14px; line-height: 1.6; }
+/* --- Rendered markdown inside agent chat bubbles --------------------------------------------------- */
+.md { font-size: 13px; line-height: 1.6; color: #E8EDEB; }
 .md > *:first-child { margin-top: 0; }
 .md > *:last-child { margin-bottom: 0; }
 .md p { margin: 0.5em 0; }
-.md h1, .md h2, .md h3, .md h4 { margin: 0.8em 0 0.4em; font-weight: 600; line-height: 1.3; }
-.md h1 { font-size: 1.25em; }
-.md h2 { font-size: 1.15em; }
-.md h3 { font-size: 1.05em; }
+.md h1, .md h2, .md h3, .md h4 { margin: 0.8em 0 0.4em; font-family: "Sora", sans-serif; font-weight: 600; line-height: 1.3; }
+.md h1 { font-size: 1.2em; }
+.md h2 { font-size: 1.12em; }
+.md h3 { font-size: 1.04em; }
 .md ul, .md ol { margin: 0.4em 0; padding-left: 1.4em; }
 .md ul { list-style: disc; }
 .md ol { list-style: decimal; }
 .md li { margin: 0.15em 0; }
-.md a { color: rgb(var(--accent)); text-decoration: underline; text-underline-offset: 2px; }
+.md a { color: #71F6BA; text-decoration: underline; text-underline-offset: 2px; }
+.md strong { color: #FFFFFF; font-weight: 600; }
 .md code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.88em;
-  background: rgb(var(--surface-2));
+  background: #001E2B;
+  border: 1px solid #1C2D38;
   padding: 0.1em 0.35em;
   border-radius: 4px;
 }
 .md pre {
-  background: rgb(var(--surface-2));
-  border: 1px solid rgb(var(--line));
+  background: #001E2B;
+  border: 1px solid #1C2D38;
   border-radius: 8px;
   padding: 10px 12px;
   overflow-x: auto;
   margin: 0.6em 0;
 }
-.md pre code { background: none; padding: 0; font-size: 0.85em; }
+.md pre code { background: none; border: 0; padding: 0; font-size: 0.85em; }
 .md blockquote {
-  border-left: 3px solid rgb(var(--line));
+  border-left: 3px solid #3D4F58;
   margin: 0.6em 0;
   padding: 0.1em 0 0.1em 0.8em;
-  color: rgb(var(--muted));
+  color: #B8C4C2;
 }
-.md table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.9em; }
-.md th, .md td { border: 1px solid rgb(var(--line)); padding: 5px 9px; text-align: left; }
-.md th { background: rgb(var(--surface-2)); font-weight: 600; }
-.md hr { border: none; border-top: 1px solid rgb(var(--line)); margin: 0.8em 0; }
+.md table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.92em; }
+.md th, .md td { border: 1px solid #1C2D38; padding: 5px 9px; text-align: left; }
+.md th { background: #001E2B; font-weight: 600; }
+.md hr { border: none; border-top: 1px solid #1C2D38; margin: 0.8em 0; }
 
 /* Skeleton shimmer for loading states. */
-.skeleton { position: relative; overflow: hidden; background: rgb(var(--surface-2)); }
+.skeleton { position: relative; overflow: hidden; background: #16303D; }
 .skeleton::after {
   content: "";
   position: absolute;
   inset: 0;
   transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent, rgba(0,0,0,0.05), transparent);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
   animation: shimmer 1.4s infinite;
-}
-@media (prefers-color-scheme: dark) {
-  .skeleton::after { background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent); }
 }
 @keyframes shimmer { 100% { transform: translateX(100%); } }

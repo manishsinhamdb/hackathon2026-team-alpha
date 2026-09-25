@@ -19,7 +19,9 @@ export interface PocSummary {
   title: string;
   status: PocStatus;
   versions: { spec?: string; code?: string };
+  created_at: string;
   updated_at: string;
+  ui_archived?: boolean;
 }
 
 export interface StepView {
@@ -62,6 +64,38 @@ export interface StageCell {
   error?: { code: string; message: string } | null;
   approvedBy?: string;
   approvedVersion?: string;
+  version?: string; // spec/code version stamped on a succeeded run cell
+}
+
+// One coder row of the "Code run" card (contract -> seed -> backend -> frontend -> assemble), derived from
+// the latest code run's tasks.
+export type CoderStatus = "done" | "running" | "queued";
+export interface CoderRowView {
+  key: string;
+  label: string;
+  status: CoderStatus;
+  duration_ms?: number | null;
+  started_at?: string;
+  percent?: number; // 0-100 when the task reports progress; otherwise undefined
+}
+
+// A "Run history" table row. `display` folds a draft-with-questions into its own status for the pill.
+export type RunDisplayStatus = "succeeded" | "running" | "failed" | "questions" | "cancelled" | "queued" | "waiting_user";
+export interface RunHistoryRow {
+  stage: RunStage;
+  stageLabel: string;
+  run_id: string;
+  display: RunDisplayStatus;
+  started_at?: string;
+  duration_ms: number | null;
+}
+
+// The library "Today" card: four counts derived from the DB.
+export interface TodaySummary {
+  drafted: number; // POCs created today
+  deployedTested: number; // POCs that reached a tested run today
+  cloudLive: number; // active cloud resources across all POCs
+  transcriptToTestedMs: number | null; // most recent created -> tested duration today
 }
 
 export interface ClarificationView {
@@ -109,6 +143,8 @@ export interface PocDetail {
   runs: RunView[];
   tasksByRun: Record<string, TaskView[]>;
   stages: StageCell[];
+  coders: CoderRowView[];
+  runHistory: RunHistoryRow[];
   clarification: ClarificationView | null;
   deployment: DeploymentView | null;
   test: TestReportView | null;
