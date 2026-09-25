@@ -261,14 +261,17 @@ Only **how long-running stages are STARTED** changed. For code, deploy and teard
 (`chat_start_code_run`, `chat_start_deploy_run`, `chat_teardown`), the A2A child call is replaced with a
 **TOP-LEVEL invocation** of the specialist's workspace through the platform invoke API — the same call an
 external client makes — so each run is its **own root session, independent of the chat turn** and survives
-the turn ending (and our short client-side disconnect). Everything else is untouched: **draft stays A2A**
-(it returns within the turn); **orchestrator→coders** and **deploy→test** stay A2A (each call < 300 s inside
-a parent that is alive); `chat_run_tests` stays A2A; the specialists' graphs, gates, and
-`chat_get_run_status` polling are unchanged. The fast-ack ergonomics are identical (`_invoke_run` mirrors
-`_a2a_run`: fire on a context-copied daemon thread, wait a short ack, then watch the `runs` document,
-return `{"status":"started","run_id":…}`).
+the turn ending (and our short client-side disconnect). At the time this was written **draft stayed A2A**
+(it returns within the turn) and **orchestrator→coders**, **deploy→test** and `chat_run_tests` were left on
+A2A — that last part was **superseded** once the token-TTL blocker below bit; see "Shared transport +
+token-TTL resolution" at the end of this section. The specialists' graphs, gates, and `chat_get_run_status`
+polling are unchanged. The fast-ack ergonomics are identical (`_invoke_run` mirrors `_a2a_run`: fire on a
+context-copied daemon thread, wait a short ack, then watch the `runs` document, return
+`{"status":"started","run_id":…}`).
 
-New module `agent_chat_agent/platform_invoke.py` (stdlib `urllib`, no new deps). Exact API calls:
+The invoke transport lives in **`poc_shared_tools.platform_invoke`** (stdlib `urllib`, no new deps; moved
+here from the chat agent so every agent can use it — `agent_chat_agent/platform_invoke.py` is now a thin
+alias). Exact API calls:
 
 - **Token** (cached for its lifetime, refreshed on 401): `POST {base}/api/v1/oauth/token`,
   `Content-Type: application/x-www-form-urlencoded`, body
@@ -329,6 +332,51 @@ New module `agent_chat_agent/platform_invoke.py` (stdlib `urllib`, no new deps).
    mid-run — is there an `App` method to force OE-client/token recreation, a longer-TTL/refresh config, or
    must a >5-min multi-call A2A chain be re-architected (e.g. coders started as top-level invokes + run-doc
    polling, like chat now starts the orchestrator)?
+
+### Shared transport + token-TTL resolution (2026-09-25)
+
+The token-TTL blocker (finding 2) is resolved by re-architecting the two long-lived A2A call chains onto the
+same top-level-invoke transport chat already uses, rather than waiting on an SDK token-refresh. The decisive
+rule, now applied everywhere:
+
+> **short in-turn hop → A2A; anything that can outlive the turn or the ~5-min A2A token → a top-level
+> platform invoke with a service account** (own root session, freshly-minted token).
+
+Concretely:
+
+- **`platform_invoke` moved into the shared package** `poc_shared_tools.platform_invoke` (was
+  `agent_chat_agent/platform_invoke.py`, now a thin alias) so any agent can use it. It gains
+  `invoke_envelope(skill, envelope, *, user_id, session_id, timeout_s=900)` — a **synchronous** helper that
+  blocks for the callee's whole reply and returns it normalised to `{"response": <AgentEnvelope>}` (the exact
+  shape the A2A path yielded via `_unwrap_envelope`, so callers keep `...["response"]` unchanged). The
+  skill→workspace-name map covers the coder + test skills (`generate-api`→api-agent, `generate-seed`→
+  data-seeding-agent, `generate-frontend`→frontend-agent, `e2e-tests`→test-agent, plus the existing
+  code-orchestration/deploy-operations/draft-spec).
+- **coding-orchestrator → each coder** is now a **synchronous top-level invoke** (`invoke_envelope`, 15-min
+  client timeout), not an A2A child. Each coder runs in its own root session with a fresh token, so a full
+  4-coder run (~6 min) no longer 401s on the last coder. `A2AClient` (and its now-unreachable refresh retry)
+  is removed from the orchestrator; `a2a.py` keeps only `invoke_tool` for its own Tool-Pod calls.
+- **deploy-agent → test agent** and **deploy-agent → orchestrator (repair)** likewise become **synchronous
+  top-level invokes**: both fire late in a long deploy run, past the ~5-min token. The test agent already
+  replies synchronously with the report; the orchestrator replies with the repaired `code_version`. The
+  A2A-timeout run-doc recovery in `tests_node` is kept as a client-disconnect fallback. `A2AClient` is
+  removed from the deploy agent too.
+- **chat_run_tests** moves from `_a2a_run` to `_invoke_run` (top-level), so the **only** remaining A2A caller
+  in the system is **chat → draft** (a short in-turn hop that returns within the turn and the token).
+- **Secrets:** the coders/orchestrator/deploy pods read the same SA creds (`POC_PLATFORM_SA_CLIENT_ID` /
+  `POC_PLATFORM_SA_CLIENT_SECRET`, service account `poc-builder-chat`) from the pod env; their `agent.yaml`
+  already grants all project secrets via `secrets: ["*"]`.
+- **Guard:** `scripts/check_platform_contract.py` now asserts coding-orchestrator and deploy-agent make their
+  cross-agent calls via `platform_invoke.invoke_envelope` and reference **no** A2A call path
+  (`A2AClient`/`find_agent`/`invoke_a2a`) in their graph, and that all four chat start/drive tools (code,
+  deploy, teardown, tests) use `_invoke_run`, not `_a2a_run`.
+- **Caveat still open (finding 1):** a synchronous top-level `POST …/invoke` is capped at ~60 s by the
+  gateway (504). A coder call is ~35–70 s and a test run is minutes, so both `invoke_envelope` callers can
+  exceed that cap on the public gateway. deploy→test tolerates it (the test agent's root session keeps
+  running and creates its run doc; the `tests_node` fallback polls `deploy_find_test_run` for the outcome),
+  but a coder that runs >60 s has **no** run-doc fallback and would surface as `CODER_UNAVAILABLE`. If the
+  cloud proof hits this cap, per the task guardrail we stop and report rather than re-architect coders onto
+  started+poll. (See the cloud-proof note below / docs/07 for the observed outcome.)
 
 ## Remaining plan
 
