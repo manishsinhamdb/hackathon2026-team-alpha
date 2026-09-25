@@ -92,6 +92,36 @@ def check_agent(agent_dir: Path, errors: list[str]) -> None:
             )
 
 
+# Chat-agent stage-start tools that must NOT be started with an A2A child call. On the platform an A2A
+# invocation is a CHILD EXECUTION of the calling turn and is cancelled when the turn ends (and it is capped
+# at 300 s), so a minutes-long stage started that way is killed mid-flight. These must be started with a
+# TOP-LEVEL platform invocation (its own root session) — see docs/06 "Platform execution model".
+CHAT_TOPLEVEL_START_TOOLS = ("chat_start_code_run", "chat_start_deploy_run", "chat_teardown")
+
+
+def check_chat_stage_starts(errors: list[str]) -> None:
+    main_py = ROOT / "agents" / "chat-agent" / "src" / "agent_chat_agent" / "main.py"
+    if not main_py.is_file():
+        errors.append("agents/chat-agent/main.py is missing")
+        return
+    text = main_py.read_text()
+    for tool in CHAT_TOPLEVEL_START_TOOLS:
+        marker = f"def {tool}("
+        i = text.find(marker)
+        if i < 0:
+            errors.append(f"chat-agent/main.py: start tool {tool!r} not found")
+            continue
+        # inspect the tool body up to the next top-level def
+        j = text.find("\ndef ", i + 1)
+        body = text[i:j if j > 0 else len(text)]
+        if "_invoke_run(" not in body:
+            errors.append(f"chat-agent/main.py: {tool!r} must start the stage via _invoke_run (top-level "
+                          "invoke), not an A2A child call — see docs/06 'Platform execution model'")
+        if "_a2a_run(" in body:
+            errors.append(f"chat-agent/main.py: {tool!r} still uses the A2A child-call path _a2a_run "
+                          "(cancelled when the chat turn ends)")
+
+
 def main() -> int:
     try:
         import yaml  # noqa: F401
@@ -103,6 +133,7 @@ def main() -> int:
     errors: list[str] = []
     for agent_dir in agent_dirs:
         check_agent(agent_dir, errors)
+    check_chat_stage_starts(errors)
 
     if errors:
         print("Platform contract check failed:")

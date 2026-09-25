@@ -127,6 +127,105 @@ def test_a2a_run_uses_sync_ack_when_available(monkeypatch):
 
 
 # =============================================================================
+# top-level invoke start path (HTTP faked): token exchange, URL, body
+# =============================================================================
+
+def _fake_http_transport(monkeypatch, *, token_status=200, invoke_run_id="run_INV"):
+    """Fake platform_invoke._http; record every call; drive token -> workspaces -> invoke. Returns the log."""
+    import agent_chat_agent.platform_invoke as pi
+    pi._tokens.clear()
+    pi._ws_map_cache.clear()
+    monkeypatch.setenv("PROJECT_ID", "proj_TEST")
+    monkeypatch.setenv("POC_PLATFORM_SA_CLIENT_ID", "cid_TEST")
+    monkeypatch.setenv("POC_PLATFORM_SA_CLIENT_SECRET", "csecret_TEST")
+    monkeypatch.delenv("POC_WORKSPACE_IDS", raising=False)
+    monkeypatch.delenv("AGENTIC_PLATFORM_BASE_URL", raising=False)
+    calls = []
+
+    def fake_http(method, url, *, headers=None, data=None, timeout=30):
+        calls.append({"method": method, "url": url, "headers": headers or {}, "data": data})
+        if url.endswith("/api/v1/oauth/token"):
+            if token_status != 200:
+                return token_status, b'{"error":"invalid_client"}'
+            return 200, json.dumps({"access_token": "tok-1", "token_type": "bearer", "expires_in": 3600}).encode()
+        if url.endswith("/workspaces?limit=200"):
+            return 200, json.dumps({"workspaces": [
+                {"workspace_id": "ws-CODE", "name": "coding-orchestrator"},
+                {"workspace_id": "ws-DEPLOY", "name": "deploy-agent"},
+            ]}).encode()
+        if "/invoke" in url:
+            envelope = {"response": {"status": "started", "result": {"run_id": invoke_run_id}}}
+            return 200, json.dumps({"success": True, "response": json.dumps(envelope), "status": "completed"}).encode()
+        raise AssertionError(f"unexpected URL {url}")
+
+    monkeypatch.setattr(pi, "_http", fake_http)
+    return calls
+
+
+def test_invoke_run_exchanges_token_resolves_ws_and_posts_envelope(monkeypatch):
+    calls = _fake_http_transport(monkeypatch)
+    out = m._invoke_run("code-orchestration", "coding_orchestrator", "start_code_run", POC,
+                        {"poc_id": POC, "spec_version": "v001"}, "code")
+    assert out["status"] == "started" and out["run_id"] == "run_INV"
+
+    # token exchange: form-encoded client_credentials with our client id + secret
+    tok = next(c for c in calls if c["url"].endswith("/oauth/token"))
+    assert tok["method"] == "POST"
+    form = dict(p.split("=", 1) for p in tok["data"].decode().split("&"))
+    assert form["grant_type"] == "client_credentials"
+    assert form["client_id"] == "cid_TEST" and form["client_secret"] == "csecret_TEST"
+
+    # invoke URL carries the project id and the workspace id resolved by name from the workspaces API
+    inv = next(c for c in calls if "/invoke" in c["url"])
+    assert inv["url"] == "https://agentic-platform.mongodb.com/api/v1/projects/proj_TEST/workspaces/ws-CODE/invoke"
+    assert inv["headers"]["Authorization"] == "Bearer tok-1"
+
+    # body: the AgentEnvelope as `message`, plus session_id + user_id
+    body = json.loads(inv["data"])
+    assert set(("message", "session_id", "user_id")) <= set(body)
+    env = json.loads(body["message"])
+    assert env["request"]["tool"] == "start_code_run"
+    assert env["request"]["agent"] == "coding_orchestrator"
+    assert env["request"]["params"]["spec_version"] == "v001"
+    assert body["session_id"].startswith("code-")  # a fresh, run-scoped session (not the chat turn's)
+    assert body["user_id"]  # required for durable identity
+
+
+def test_invoke_run_refreshes_token_on_401(monkeypatch):
+    """A 401 on invoke forces one token refresh and a retry (then succeeds)."""
+    import agent_chat_agent.platform_invoke as pi
+    calls = _fake_http_transport(monkeypatch)
+    state = {"invoke_calls": 0}
+    real_http = pi._http
+
+    def flaky_http(method, url, *, headers=None, data=None, timeout=30):
+        if "/invoke" in url:
+            state["invoke_calls"] += 1
+            if state["invoke_calls"] == 1:
+                calls.append({"method": method, "url": url, "headers": headers or {}, "data": data})
+                return 401, b'{"error":"unauthorized"}'
+        return real_http(method, url, headers=headers, data=data, timeout=timeout)
+
+    monkeypatch.setattr(pi, "_http", flaky_http)
+    out = m._invoke_run("deploy-operations", "deploy_agent", "start_deploy_run", POC,
+                        {"poc_id": POC, "code_version": "v001", "options": {}}, "deploy")
+    assert out["status"] == "started" and out["run_id"] == "run_INV"
+    # two token exchanges (initial + forced refresh after 401) and two invoke attempts
+    assert sum(1 for c in calls if c["url"].endswith("/oauth/token")) == 2
+    assert state["invoke_calls"] == 2
+
+
+def test_invoke_run_reports_failure_when_workspace_unresolved(monkeypatch):
+    """If resolution fails, the start tool returns failed synchronously (it never claims the stage started)."""
+    import agent_chat_agent.platform_invoke as pi
+    monkeypatch.setattr(pi, "resolve_workspace_id", lambda skill: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = m._invoke_run("code-orchestration", "coding_orchestrator", "start_code_run", POC,
+                        {"poc_id": POC, "spec_version": "v001"}, "code")
+    assert out["status"] == "failed" and out["run_id"] is None
+    assert out["error"]["code"] == "WORKSPACE_UNRESOLVED"
+
+
+# =============================================================================
 # scripted graph
 # =============================================================================
 
@@ -180,20 +279,32 @@ def _install_fakes(monkeypatch):
         return {"response": {"task_id": env["request"]["task_id"], "status": "succeeded",
                              "result": {"spec_version": "v001", "user_story_count": 5, "assumptions": ["a"]}}}
 
-    def make_run_handler(stage, gate):
-        def handler(env):
-            approved = any(e[0] == "approval" and e[1] == gate for e in events)
-            assert approved, f"{stage} run started without {gate}!"
-            events.append(("run", stage))
-            return {"response": {"task_id": env["request"]["task_id"], "status": "started",
-                                 "result": {"run_id": new_id("run")}}}
-        return handler
+    # draft stays A2A (returns within the turn); code/deploy/teardown are started with a top-level platform
+    # invoke (their own root session). Only draft goes through the fake A2A handlers now.
+    m.app.a2a_handlers = {"draft-spec": draft_handler}
 
-    m.app.a2a_handlers = {
-        "draft-spec": draft_handler,
-        "code-orchestration": make_run_handler("code", "spec_approved"),
-        "deploy-operations": make_run_handler("deploy", "code_approved"),
+    # Fake the top-level invoke path. The invoke's AgentEnvelope `message` names the tool, from which we
+    # derive the stage + the gate that must already be recorded — the same invariant the old A2A handlers
+    # enforced. We ack synchronously with a run_id embedded in the response so _extract_invoke_run_id finds
+    # it (no run-document polling needed in the test).
+    tool_stage_gate = {
+        "start_code_run": ("code", "spec_approved"),
+        "start_deploy_run": ("deploy", "code_approved"),
+        "teardown_poc": ("teardown", None),
     }
+
+    def fake_invoke_workspace(workspace_id, message, *, session_id, user_id, timeout_s=120):
+        env = json.loads(message)
+        stage, gate = tool_stage_gate[env["request"]["tool"]]
+        if gate is not None:
+            assert any(e[0] == "approval" and e[1] == gate for e in events), f"{stage} run started without {gate}!"
+        events.append(("run", stage))
+        envelope = {"response": {"task_id": env["request"]["task_id"], "status": "started",
+                                 "result": {"run_id": new_id("run")}}}
+        return {"success": True, "response": json.dumps(envelope), "status": "completed"}
+
+    monkeypatch.setattr(m.platform_invoke, "resolve_workspace_id", lambda skill: f"ws-fake-{skill}")
+    monkeypatch.setattr(m.platform_invoke, "invoke_workspace", fake_invoke_workspace)
     return events
 
 

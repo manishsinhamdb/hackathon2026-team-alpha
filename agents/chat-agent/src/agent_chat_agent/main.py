@@ -32,6 +32,7 @@ from langgraph.graph.state import CompiledStateGraph
 from agent_engine_sdk_langgraph import App
 
 from poc_contracts import Envelope, new_id
+from agent_chat_agent import platform_invoke
 from agent_chat_agent.a2a import A2AClient, invoke_tool
 from agent_chat_agent.llm import build_llm
 
@@ -211,8 +212,8 @@ def chat_call_draft(poc_id: str, answers_json: str = "", force_assumptions: bool
 @app.tool(timeout=290)
 def chat_start_code_run(poc_id: str, spec_version: str) -> str:
     """Start the Stage-2 code run (background). Returns {"status", "run_id"}."""
-    return json.dumps(_a2a_run("code-orchestration", "coding_orchestrator", "start_code_run", poc_id,
-                               {"poc_id": poc_id, "spec_version": spec_version}, "code"), default=str)
+    return json.dumps(_invoke_run("code-orchestration", "coding_orchestrator", "start_code_run", poc_id,
+                                  {"poc_id": poc_id, "spec_version": spec_version}, "code"), default=str)
 
 
 @app.tool(timeout=290)
@@ -225,8 +226,8 @@ def chat_start_deploy_run(poc_id: str, code_version: str, options_json: str = ""
             options = json.loads(options_json)
         except json.JSONDecodeError:
             return json.dumps({"status": "failed", "error": {"code": "BAD_OPTIONS_JSON", "message": options_json[:200]}})
-    return json.dumps(_a2a_run("deploy-operations", "deploy_agent", "start_deploy_run", poc_id,
-                               {"poc_id": poc_id, "code_version": code_version, "options": options}, "deploy"),
+    return json.dumps(_invoke_run("deploy-operations", "deploy_agent", "start_deploy_run", poc_id,
+                                  {"poc_id": poc_id, "code_version": code_version, "options": options}, "deploy"),
                       default=str)
 
 
@@ -242,8 +243,8 @@ def chat_run_tests(poc_id: str, deployment_run_id: str = "") -> str:
 @app.tool(timeout=290)
 def chat_teardown(poc_id: str) -> str:
     """Tear down the POC's cloud resources (background). Returns {"status", "run_id"}."""
-    return json.dumps(_a2a_run("deploy-operations", "deploy_agent", "teardown_poc", poc_id,
-                               {"poc_id": poc_id}, "teardown"), default=str)
+    return json.dumps(_invoke_run("deploy-operations", "deploy_agent", "teardown_poc", poc_id,
+                                  {"poc_id": poc_id}, "teardown"), default=str)
 
 
 # --- A2A helpers -------------------------------------------------------------
@@ -273,6 +274,14 @@ A2A_ACK_TIMEOUT_S = 8
 A2A_BG_TIMEOUT_S = 290
 RUN_APPEAR_TIMEOUT_S = 25
 RUN_APPEAR_POLL_S = 2
+
+# Top-level invoke (code / deploy / teardown starts). We fire the HTTP invoke on a context-copied daemon
+# thread and wait only a short ack, then poll for the run doc — identical ergonomics to _a2a_run. The
+# crucial difference from A2A: the invoked run is its OWN root session, so it keeps executing server-side
+# after this turn ends and after we disconnect. INVOKE_FIRE_TIMEOUT_S is deliberately short (the run may take
+# minutes); it only bounds how long the daemon holds the connection, not the run.
+INVOKE_ACK_TIMEOUT_S = 8
+INVOKE_FIRE_TIMEOUT_S = 120
 
 
 def _a2a_run(skill: str, agent_name: str, tool: str, poc_id: str, params: dict[str, Any],
@@ -314,6 +323,84 @@ def _a2a_run(skill: str, agent_name: str, tool: str, poc_id: str, params: dict[s
     if found:
         return {"status": found.get("status", "started"), "run_id": found.get("run_id"), "response": resp}
     return {"status": resp.get("status", "started"), "run_id": _extract_run_id(resp), "response": resp}
+
+
+def _invoke_run(skill: str, agent_name: str, tool: str, poc_id: str, params: dict[str, Any],
+                stage: str) -> dict[str, Any]:
+    """Start a long-running stage with a TOP-LEVEL platform invocation (a root session, independent of this
+    chat turn) instead of an A2A child call, then return as soon as its run is registered — do NOT block for
+    the stage to finish. Mirrors _a2a_run: fire on a context-copied daemon thread, wait a short ack, then
+    watch for the freshly-created runs document. Returns {"status", "run_id", "response"}.
+
+    Motivation: an A2A call is a child of this turn and the platform cancels it when the turn ends (and it is
+    capped at 300 s). A top-level invoke keeps running server-side after we disconnect, which is what a
+    minutes-long code/deploy/teardown stage needs."""
+    env = Envelope.request(poc_id=poc_id, run_id=new_id("run"), caller="chat_agent", agent=agent_name,
+                           tool=tool, params=params, task_id=new_id("task"))
+    user_id = app.get_current_user_id() or "u_local"
+    session_id = f"{stage}-{env['request']['run_id']}"  # a fresh session so the run is its own, not this turn's
+
+    # Resolve the workspace id up front so a resolution/token error surfaces synchronously (before we claim
+    # the stage started). This is a fast API lookup; the long-running invoke happens off-thread below.
+    try:
+        workspace_id = platform_invoke.resolve_workspace_id(skill)
+    except Exception as e:
+        logger.warning("invoke %s: workspace resolution failed: %s", stage, e)
+        return {"status": "failed", "run_id": None,
+                "error": {"code": "WORKSPACE_UNRESOLVED", "message": str(e)[:300]}}
+
+    before = (_newest_run(poc_id, stage) or {}).get("run_id")
+    box: dict[str, Any] = {}
+
+    def _call() -> None:
+        try:
+            box["resp"] = platform_invoke.invoke_workspace(
+                workspace_id, json.dumps(env), session_id=session_id, user_id=user_id,
+                timeout_s=INVOKE_FIRE_TIMEOUT_S)
+        except Exception as e:  # a short-timeout disconnect is expected for a long run; the run doc recovers it
+            box["error"] = str(e)
+
+    # Copy the current context so any scope/auth carried on contextvars is preserved off the main thread.
+    ctx = contextvars.copy_context()
+    th = threading.Thread(target=lambda: ctx.run(_call), name=f"invoke-{stage}", daemon=True)
+    th.start()
+    th.join(INVOKE_ACK_TIMEOUT_S)
+
+    if "resp" in box:  # the specialist acked within the ack window — use its run_id if present
+        run_id = _extract_invoke_run_id(box["resp"])
+        if run_id:
+            return {"status": "started", "run_id": run_id, "response": box["resp"]}
+    if th.is_alive():
+        logger.info("invoke %s.%s still running after %ss ack window; polling for the run document",
+                    agent_name, tool, INVOKE_ACK_TIMEOUT_S)
+    resp: dict[str, Any] = box.get("resp") or {
+        "status": "started",
+        "error": {"code": "INVOKE_ACK_TIMEOUT", "message": box.get("error", f"no ack within {INVOKE_ACK_TIMEOUT_S}s")},
+    }
+    found = _await_new_run(poc_id, stage, before)
+    if found:
+        return {"status": found.get("status", "started"), "run_id": found.get("run_id"), "response": resp}
+    return {"status": resp.get("status", "started"), "run_id": None, "response": resp}
+
+
+def _extract_invoke_run_id(resp: dict[str, Any]) -> str | None:
+    """Pull a run_id out of a platform invoke response {success, response, ...} whose `response` carries the
+    specialist's AgentEnvelope (possibly OE-wrapped). Returns None for the common case of a long run that has
+    not replied yet (we then poll the runs document instead)."""
+    if not isinstance(resp, dict):
+        return None
+    from agent_chat_agent.a2a import _unwrap_envelope
+    inner = resp.get("response")
+    if isinstance(inner, str):
+        try:
+            inner = json.loads(inner)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(inner, dict):
+        return None
+    envelope = _unwrap_envelope(inner).get("response", {})
+    rid = (envelope.get("result") or {}).get("run_id") if isinstance(envelope, dict) else None
+    return rid if isinstance(rid, str) else None
 
 
 def _await_new_run(poc_id: str, stage: str, before_run_id: str | None) -> dict[str, Any] | None:
