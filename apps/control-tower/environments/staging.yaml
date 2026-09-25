@@ -7,7 +7,7 @@ replicaCount: 1
 ingress:
   enabled: true
   hosts:
-    - control-tower.sa-demo.staging.corp.mongodb.com
+    - pov-gen.sa-demo.staging.corp.mongodb.com
 
 services:
   - name: http
