@@ -30,6 +30,39 @@ Two panes on one laptop-width screen:
 The UI is **strictly read-only on the DB**. It never writes — every state change happens through the
 chat agent (and the agent's own tools), which is what the action buttons drive.
 
+## The UI (structure & design)
+
+The visual layer is a **MongoDB-house / Leafygreen** design: the green accent `#00ED64` on near-black
+`#001E2B` for the top bar and dark surfaces, white / `#F9FBFA` content surfaces, a grey text scale,
+generous spacing and strong hierarchy — no gradients or decoration. It is built with **Tailwind**
+(semantic colour tokens driven by CSS variables, so the same classes render in light and dark),
+**lucide-react** icons and **react-markdown + remark-gfm** for agent replies. **Light is the default;
+the app honours `prefers-color-scheme: dark`.** Layout is laptop-first — two columns ≥1024px, stacked
+below. Data flows and routes are unchanged from the functional version; this is a presentation layer only.
+
+Components (`src/components/`):
+
+- **`TopBar`** — product name *POC Builder — Control Tower*, the POC selector (title + a status pill),
+  **New POC** and **New session** actions, and a connection/health dot (green when the last poll
+  succeeded, red on error).
+- **`Chat`** — messages as bubbles with **markdown rendering** (tables and code blocks), per-message
+  timestamps, a three-dot **streaming indicator** while a turn is in flight, and a sticky composer: a
+  transcript textarea + `.txt` picker and a compact row of **action chips** (*Show me the spec* · *Build
+  it* · *Deploy (4h TTL)* · *How's it going?* · *Tear it down* · *Retry*). **Enter sends; Shift+Enter is a
+  newline.** The chips send the same canned messages as before (behaviour unchanged; only the labels are
+  compact). `MessageBubble` renders one bubble; recovered history is shown dimmed behind a toggle.
+- **`Stepper`** — the vertical **Draft → Spec approved → Code → Code approved → Deploy → Tests → Torn
+  down** stage stepper. Each cell shows its state — *not started* / *running* with a live elapsed timer /
+  *succeeded* with a final duration / *failed* with the error code+reason — gates show *approved
+  \<version\> by \<who\>*, and run ids are click-to-copy. `StageStep` is pure (given a `StageCell` + `now`)
+  and is covered by render tests (`src/test/stepper.test.tsx`).
+- **`PipelineBoard`** — the stepper plus cards: **Clarification needed** (questions rendered, "answer in
+  chat" hint), **Deployment** (App / API / Health as buttons, copyable EC2 id, live TTL countdown),
+  **Cloud resources** (green `0` / red `>0` badge + table), **Test report** summary, and Spec/Code version
+  chips in the header. The 10 s polling, 1 s ticker, tab-hidden pause and post-chat refresh are unchanged.
+- **`Toasts`** — error toasts for BFF failures (chat and poll), with dedup so a repeatedly failing poll
+  doesn't spam. **Loading skeletons** and **empty states** cover first paint and the "no POC selected" case.
+
 ## The polling design
 
 The board polls `GET /api/pocs/:id` every **10 s**. Key properties:
@@ -116,13 +149,48 @@ at `/healthz`, expose `PORT`. Nothing else changes between local Docker and the 
 - **Unit tests:** 31 passing (token cache + SSE parsing; POC aggregation) with fake fetch/clock and fixture DB
   documents.
 
-## Left open for the Kanopy deployment
+## Deploy on Kanopy (staging, namespace `sa-demo`)
 
-- Build & push the image to the internal registry; wire the env vars as K8s secrets/config; set
-  liveness+readiness probes on `/healthz`; expose `PORT`.
-- Decide network egress: the pod needs outbound to `PLATFORM_BASE_URL` and to the Atlas cluster
-  (`POC_PLATFORM_MONGODB_URI`) — the Atlas network access list must include the cluster's egress IP for
-  Control Tower's pod (same class of allowlist step the agents need).
-- Optional hardening: put the UI behind the internal SSO/ingress; the SA secret rotation cadence; a readiness
-  probe that also checks DB reachability if you want the pod to drop out of rotation on a DB outage (the
-  current `/healthz` intentionally does not).
+This mirrors the MXH / mdb-playground pattern exactly (`mongodb/web-app` Helm chart via `drone-helm`,
+image built by `kaniko-ecr`) — no new pattern was invented. Two files carry it:
+
+- **`/.drone.yml`** (repo root — Drone only reads the pipeline from the root). Two steps, both gated on
+  push to `main`:
+  - **`publish`** (`plugins/kaniko-ecr`) → builds the image and pushes it to ECR
+    `795250896452.dkr.ecr.us-east-1.amazonaws.com/sa-demo/${DRONE_REPO_NAME}`, tags `git-<sha7>` + `latest`.
+    Because this is a **monorepo**, the build context and Dockerfile are pinned to the app:
+    `context: apps/control-tower`, `dockerfile: apps/control-tower/Dockerfile`.
+  - **`deploy-staging`** (`public.ecr.aws/kanopy/drone-helm:v3`) → `helm upgrade` of chart
+    `mongodb/web-app` `4.30.0`, `namespace: sa-demo`, `release: control-tower`, `values_files:
+    apps/control-tower/environments/staging.yaml`, `api_server: https://api.staging.corp.mongodb.com`,
+    token from the `staging_kubernetes_token` Drone secret.
+- **`apps/control-tower/environments/staging.yaml`** — the Helm values: `ingress.hosts:
+  [control-tower.sa-demo.staging.corp.mongodb.com]`; one `http` service, `port 80` → `targetPort 3100`;
+  liveness+readiness `httpGet /healthz`; non-secret `env` (`PLATFORM_BASE_URL`, `PLATFORM_PROJECT_ID`,
+  `CHAT_WORKSPACE_ID`, `POC_PLATFORM_DB`, `UI_USER_ID`, `PORT=3100`); and `envSecrets` mapping
+  `PLATFORM_SA_CLIENT_ID` / `PLATFORM_SA_CLIENT_SECRET` / `POC_PLATFORM_MONGODB_URI` to the k8s Secret
+  `control-tower-secrets`. `security`/`ownership` blocks match the house convention.
+
+**Hostname:** `https://control-tower.sa-demo.staging.corp.mongodb.com`.
+
+**The secret** (never in the repo). Convention `<release>-secrets` → `control-tower-secrets` in `sa-demo`,
+created from `apps/control-tower/.env.local` **without printing values**:
+
+```bash
+export KUBECONFIG=~/.kube/config.staging          # context: api.staging.corp.mongodb.com, ns sa-demo
+apps/control-tower/deploy/kanopy-create-secret.sh # reads the 3 keys from .env.local, pipes into kubectl
+```
+
+**Identity / CorpSecure.** CorpSecure at the ingress is the login. Kanopy injects **no** trustworthy
+identity header and forwards client headers unstripped — so the app **trusts no inbound identity header**:
+chat turns are stamped with the fixed server-side `UI_USER_ID`, never a header value. No annotations are
+needed in the values file (SSO is enforced upstream of the pod), matching MXH.
+
+**Atlas egress (operator step — not automatable here).** The pod's DB reads leave through Kanopy's staging
+NAT egress IPs **`35.174.112.8`, `35.170.235.251`, `35.174.21.138`**. These must be on the Atlas cluster
+`pov` **Network Access** list or the pod cannot reach `POC_PLATFORM_MONGODB_URI` (chat still works; the
+board's polling fails). This is an Atlas UI action for the operator.
+
+**Verification.** After the build+deploy: `curl https://control-tower.sa-demo.staging.corp.mongodb.com/healthz`
+→ `{"status":"ok",...}`; open the host (CorpSecure login), select a POC, confirm the board polls (if the
+board errors on DB reads but chat works, the egress IPs are not yet allow-listed).

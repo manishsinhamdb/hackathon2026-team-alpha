@@ -595,3 +595,13 @@ real browser on http://localhost:3100** driving `poc_01M3CHJMABWPXT6XP182RHSCEK`
 shows draft run `run_01M3CN9ANTM0D1CCBYZR1E0BDX` succeeded + Code not started; "Show me the spec" rendered the
 full v003 summary; "How's it going?" kept the board consistent via polling, no refresh. No code/deploy/
 teardown run → no AWS/Atlas resources. Full detail: `docs/09_control-tower.md`.
+
+**UI polish + Kanopy (2026-09-26).** The UI was reworked into a MongoDB-house / Leafygreen product
+(Tailwind, lucide-react, react-markdown; top bar + chat bubbles with markdown + vertical stage stepper +
+board cards; light/dark; 37 tests). Kanopy deploy wired mirroring MXH: repo-root `.drone.yml`
+(kaniko-ecr build with `context: apps/control-tower` → `drone-helm` deploy of `mongodb/web-app` 4.30.0)
+and `apps/control-tower/environments/staging.yaml`, release **`control-tower`**, namespace **`sa-demo`**,
+hostname **`https://control-tower.sa-demo.staging.corp.mongodb.com`**, secret **`control-tower-secrets`**.
+Pod DB reads egress via Kanopy staging NAT IPs `35.174.112.8 / 35.170.235.251 / 35.174.21.138` — must be
+on the Atlas `pov` network-access list (operator step). App trusts no inbound identity header (CorpSecure
+at ingress is the login). Full detail: `docs/09_control-tower.md` § Deploy on Kanopy.

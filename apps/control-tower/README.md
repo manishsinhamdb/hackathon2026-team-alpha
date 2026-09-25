@@ -102,4 +102,19 @@ so the same image serves any project.
 
 Single container, config via env, `/healthz` for probes, non-root, `PORT`-driven. Provide the env vars as
 Kubernetes secrets/config, point a liveness+readiness probe at `/healthz`, and expose the `PORT`. No
-persistent volume, no vendor SDK, no build-time secrets. See `docs/09_control-tower.md`.
+persistent volume, no vendor SDK, no build-time secrets.
+
+**Staging (namespace `sa-demo`) is wired**, mirroring the MXH pattern:
+
+- **`/.drone.yml`** (repo root) — `kaniko-ecr` build with `context: apps/control-tower` →
+  `drone-helm` deploy of `mongodb/web-app` 4.30.0, release `control-tower`.
+- **`environments/staging.yaml`** — Helm values: host
+  `control-tower.sa-demo.staging.corp.mongodb.com`, `targetPort 3100`, `/healthz` probes, non-secret
+  `env`, and `envSecrets` → the `control-tower-secrets` Secret.
+- **`deploy/kanopy-create-secret.sh`** — creates `control-tower-secrets` in `sa-demo` from `.env.local`
+  (`PLATFORM_SA_CLIENT_ID`, `PLATFORM_SA_CLIENT_SECRET`, `POC_PLATFORM_MONGODB_URI`) without printing
+  values.
+
+The pod's DB reads egress via Kanopy's staging NAT IPs `35.174.112.8 / 35.170.235.251 / 35.174.21.138`,
+which must be on the Atlas `pov` network-access list. Full runbook: `docs/09_control-tower.md`
+§ Deploy on Kanopy.

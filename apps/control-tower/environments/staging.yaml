@@ -1,0 +1,67 @@
+# Control Tower — Kanopy (staging, namespace sa-demo) Helm values for the mongodb/web-app chart.
+# Mirrors the MXH / mdb-playground pattern exactly; only the release-specific bits differ.
+# Consumed by the deploy-staging step in the repo-root .drone.yml.
+arch: amd64
+replicaCount: 1
+
+ingress:
+  enabled: true
+  hosts:
+    - control-tower.sa-demo.staging.corp.mongodb.com
+
+services:
+  - name: http
+    ingress: true
+    port: 80
+    probes: true
+    protocol: TCP
+    targetPort: 3100   # the Next.js standalone server listens on PORT=3100
+    type: ClusterIP
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1
+    memory: 2Gi
+
+# Non-secret configuration only. The BFF holds the SA secret / DB URI (see envSecrets below);
+# these are ids/URLs/names that are safe in the repo.
+env:
+  PORT: "3100"
+  ENVIRONMENT: staging
+  PLATFORM_BASE_URL: https://agentic-platform.mongodb.com
+  PLATFORM_PROJECT_ID: 6aacc8c7a77ed8f0d8a5f8cf   # hackathon2026 project id
+  CHAT_WORKSPACE_ID: ws-6ab604c1fd6e031412c60246   # the chat agent's workspace
+  POC_PLATFORM_DB: poc_builder
+  # Identity is enforced by CorpSecure at the ingress; the app authenticates nobody and trusts NO
+  # inbound identity header (Kanopy forwards client headers unstripped). Chat turns are stamped with
+  # this fixed server-side user_id, never a header value.
+  UI_USER_ID: u_ui
+
+# Secret env: mapped from the k8s Secret `control-tower-secrets` (create it in the namespace, never
+# in the repo). Convention: <release>-secrets. The chart injects each key as the named env var.
+envSecrets:
+  PLATFORM_SA_CLIENT_ID: control-tower-secrets
+  PLATFORM_SA_CLIENT_SECRET: control-tower-secrets
+  POC_PLATFORM_MONGODB_URI: control-tower-secrets
+
+# Liveness + readiness both hit /healthz, which returns 200 without touching the DB or platform, so a
+# transient DB/platform outage does not evict or de-rotate the pod.
+probes:
+  enabled: true
+  path: /healthz
+  liveness:
+    httpGet: true
+    initialDelaySeconds: 20
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+security:
+  dataClassification: "Internal"
+  dataDesignation: ["MI"]
+
+ownership:
+  driEmail: manishkumar.sinha@mongodb.com

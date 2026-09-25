@@ -1,0 +1,53 @@
+---
+# Kanopy CI/CD for the Control Tower web UI (apps/control-tower) in this monorepo.
+# Mirrors the MXH / mdb-playground pipeline exactly: kaniko-ecr build -> drone-helm deploy of the
+# mongodb/web-app chart into namespace sa-demo on the staging cluster. The only monorepo-specific
+# change is that the Docker build context / Dockerfile point at apps/control-tower.
+kind: pipeline
+type: kubernetes
+name: default
+
+platform:
+  arch: amd64
+
+trigger:
+  branch:
+  - main
+
+steps:
+- name: publish
+  image: plugins/kaniko-ecr
+  settings:
+    create_repository: true
+    registry: 795250896452.dkr.ecr.us-east-1.amazonaws.com
+    repo: sa-demo/${DRONE_REPO_NAME}
+    # Build the Control Tower image from its subdirectory (context + Dockerfile), not the repo root.
+    context: apps/control-tower
+    dockerfile: apps/control-tower/Dockerfile
+    tags:
+    - git-${DRONE_COMMIT_SHA:0:7}
+    - latest
+    access_key:
+      from_secret: ecr_access_key
+    secret_key:
+      from_secret: ecr_secret_key
+  when:
+    event:
+    - push
+
+- name: deploy-staging
+  image: public.ecr.aws/kanopy/drone-helm:v3
+  settings:
+    chart: mongodb/web-app
+    chart_version: 4.30.0
+    add_repos: [mongodb=https://10gen.github.io/helm-charts]
+    namespace: sa-demo
+    release: control-tower
+    values: image.tag=git-${DRONE_COMMIT_SHA:0:7},image.repository=795250896452.dkr.ecr.us-east-1.amazonaws.com/sa-demo/${DRONE_REPO_NAME}
+    values_files: [ "apps/control-tower/environments/staging.yaml" ]
+    api_server: https://api.staging.corp.mongodb.com
+    kubernetes_token:
+      from_secret: staging_kubernetes_token
+  when:
+    event:
+    - push
