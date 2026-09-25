@@ -376,7 +376,37 @@ Concretely:
   running and creates its run doc; the `tests_node` fallback polls `deploy_find_test_run` for the outcome),
   but a coder that runs >60 s has **no** run-doc fallback and would surface as `CODER_UNAVAILABLE`. If the
   cloud proof hits this cap, per the task guardrail we stop and report rather than re-architect coders onto
-  started+poll. (See the cloud-proof note below / docs/07 for the observed outcome.)
+  started+poll.
+
+### Cloud-proof outcome (2026-09-25) — the ~60 s cap blocks the code stage; STOPPED per guardrail
+
+Drove the full happy path through the deployed chat agent (all three changed agents rebuilt + redeployed +
+invoke-proven first). POC `poc_01M3C710FS3X1MBM33WDS24S27`, spec v001, code run
+`run_01M3C7D8ND0S591JZ1HWM07XZ4`. The transport change **works** for a coder under the cap and **is blocked**
+by finding 1's ~60 s synchronous-invoke gateway cap for a coder over it:
+
+- **contract coder** (api-agent) — synchronous top-level invoke, ~67 s, **succeeded** (past 60 s, no 504).
+  This confirms the coder chain no longer 401s on the OE A2A token: each coder ran in its own root session.
+- **seed coder** (data-seeding-agent) — its own root session ran `seed_execute` for **81.6 s and SUCCEEDED**
+  (logged `seed_execute success (81621ms)`; the seed was generated + uploaded), **but the orchestrator's
+  synchronous `invoke_envelope` 504'd at ~60 s** and, with no run-doc/S3 fallback in `coders_node`, failed
+  the run `CODER_UNAVAILABLE`/504. Backend + frontend never started.
+
+**Conclusion (evidence-backed):** the ~60 s gateway cap on a *synchronous* `POST …/invoke` is real and
+applies to the orchestrator→coder top-level invoke exactly as finding 1 predicted. A coder whose generation
+exceeds ~60 s (the seed step reliably does) makes the synchronous pattern fail even though the callee's root
+session **completes** — so this is a caller-side transport problem, not a callee failure. Per the task
+guardrail ("if the platform rejects a synchronous top-level invoke of that length … stop and report"), we
+stopped here. No deploy stage ran, so **no AWS resources were created** (nothing to tear down).
+
+**The fix that is now indicated (out of scope for this task — a re-architecture, not a small change):** start
+each coder as a **fire-and-forget** top-level invoke (short client timeout, disconnect) and **poll for the
+coder's output** — the callee's root session survives the 504 and finishes, so poll S3 for the deterministic
+artifact prefix `pocs/{poc}/code/{version}/{component}/` (or give coders a run doc to poll like the durable
+specialists). This is the coder analogue of how chat already starts the orchestrator. deploy→test already has
+this fallback (`deploy_find_test_run` + poll), so deploy→test is expected to tolerate the cap; only
+orchestrator→coders needs the change. It was left out because the task fixed orchestrator→coders as a
+*synchronous* call and the guardrail directed stop-and-report over re-architecting.
 
 ## Remaining plan
 
