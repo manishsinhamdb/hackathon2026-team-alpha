@@ -503,3 +503,13 @@ end to end. The only thing between here and a full teardown-proof happy path is 
    callee's `allowed_callers` with the caller workspace IDs (§4.1 table in docs/02).
 3. Create the Atlas Vector Search index `spec_vector_idx` on `poc_builder.spec_embeddings`
    (docs/atlas-vector-index.json) for Draft-Agent RAG.
+
+## Cloud happy path — COMPLETE (2026-09-25, evening)
+POC `poc_01M3CAZCBNS6FX5G5CB297J2TP` driven through the deployed chat agent (CLI, session `e2e-final`):
+transcript → spec v001 → `spec_approved` → code run `run_01M3CBCF1HNNKD1QNCDCMRZPH6` (7 m 51 s, all four coders
+via start-and-poll) → `code_approved` (implicit) → deploy run `run_01M3CER6MPNAG6NC9466N3H1NV` (provision_db →
+EC2 t3.medium ap-south-1 `i-05aa06fcc80206350` → seed → backend → frontend → publish → tests passed) → teardown
+succeeded (4 resources released) → status `torn_down`, active cloud_resources 0, AWS admin query shows no
+msinha- instances. Atlas service-account API access list holds 54.227.181.25, 44.214.209.237, 52.44.27.64
+(0.0.0.0/0 is refused for service accounts; pod egress may rotate). Remaining housekeeping: golden POC
+`poc_01K5ZGF1XTVREG0000000000A1` still carries 2 non-billable Atlas entries — clear via teardown/reaper.
