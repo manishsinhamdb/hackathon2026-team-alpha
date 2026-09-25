@@ -236,6 +236,65 @@ coding-orchestrator, test, deploy, draft each return a real `INVALID_ENVELOPE` A
 | draft-agent | `bld_01M3BT17JTNSXM1JEFB4396AWC` | `deploy-ba524644` |
 | chat-agent | `bld_01M3BT1C1KP0SX71BQCVDAYTB4` | `deploy-029e9402` |
 
+## Platform execution model (2026-09-25)
+
+Driving the happy path through the **deployed** chat agent surfaced a cloud-only failure the local stack
+never showed: after the orchestrator started and ran api-agent (`api_execute`, contract, 38 s) it went
+completely silent — no timeout, no fallback, no further log lines — leaving run
+`run_01M3BWT1AT8VQDXDAW2YX0TWQH` (POC `poc_01M3BW7CNPFCPNSQDN7JFMFVVR`) stuck with task 1 "running" and
+zero cloud resources. Root cause is the platform execution model:
+
+- **A2A is a CHILD EXECUTION of the calling turn/session.** When the calling turn completes (the chat
+  agent fast-acks a stage start and returns), or the session is finished/reclaimed, the platform
+  **cancels any live child A2A execution**. Locally the OE let children outlive the parent turn, which is
+  exactly what the chat agent's fast-ack pattern relied on — so it worked in `agentic dev up` and died in
+  the cloud. The orchestrator (a chat child) was killed the moment the chat turn returned.
+- **The A2A call timeout is capped at 300 s.** Even without the parent-turn cancellation, a single A2A
+  call cannot cover a minutes-long stage.
+- **The Playground stream drops on long turns.** For the end-to-end proof, use the CLI
+  (`agentic invoke --workspace chat-agent --context hackathon2026 --session <id> --user-id <id> --json`),
+  not the Playground.
+
+### New stage-start design (chat-agent) — top-level invoke, not A2A child
+
+Only **how long-running stages are STARTED** changed. For code, deploy and teardown starts
+(`chat_start_code_run`, `chat_start_deploy_run`, `chat_teardown`), the A2A child call is replaced with a
+**TOP-LEVEL invocation** of the specialist's workspace through the platform invoke API — the same call an
+external client makes — so each run is its **own root session, independent of the chat turn** and survives
+the turn ending (and our short client-side disconnect). Everything else is untouched: **draft stays A2A**
+(it returns within the turn); **orchestrator→coders** and **deploy→test** stay A2A (each call < 300 s inside
+a parent that is alive); `chat_run_tests` stays A2A; the specialists' graphs, gates, and
+`chat_get_run_status` polling are unchanged. The fast-ack ergonomics are identical (`_invoke_run` mirrors
+`_a2a_run`: fire on a context-copied daemon thread, wait a short ack, then watch the `runs` document,
+return `{"status":"started","run_id":…}`).
+
+New module `agent_chat_agent/platform_invoke.py` (stdlib `urllib`, no new deps). Exact API calls:
+
+- **Token** (cached for its lifetime, refreshed on 401): `POST {base}/api/v1/oauth/token`,
+  `Content-Type: application/x-www-form-urlencoded`, body
+  `grant_type=client_credentials&client_id=$POC_PLATFORM_SA_CLIENT_ID&client_secret=$POC_PLATFORM_SA_CLIENT_SECRET`.
+  Returns `{access_token, token_type, expires_in}`; bad creds → `401 {"error":"invalid_client"}`. Creds are
+  project secrets (service account `poc-builder-chat`, role AGENT_DEVELOPER, client id
+  `ae_sa_id_6ab63f46bcd65e0d08e0a405`); chat-agent's `agent.yaml` grants them via `secrets: ["*"]` and the
+  agent reads them from the pod env like every other secret. `base` = `AGENTIC_PLATFORM_BASE_URL` or
+  `https://agentic-platform.mongodb.com`. Egress is allow_all so the pod reaches the public API.
+- **Workspace id resolution** (by skill, no hard-coded ids): A2A discovery only exposes the A2A *app id*
+  (e.g. `902433…`), **not** the `ws-…` workspace id the invoke API needs, so we resolve via
+  `GET {base}/api/v1/projects/{project}/workspaces?limit=200` (Bearer token) →
+  `{workspaces:[{workspace_id, name}]}` and map skill→workspace-name→id (cached). Env override
+  `POC_WORKSPACE_IDS` (JSON `{skill: ws-id}`) wins if set. `project` = `PROJECT_ID`/`GROUP_ID` from the pod
+  env, else the fixed project constant.
+- **Invoke** (fired on a daemon thread, short client timeout — the run may take minutes but keeps executing
+  server-side after we disconnect):
+  `POST {base}/api/v1/projects/{project}/workspaces/{ws}/invoke`, `Authorization: Bearer <token>`,
+  `Content-Type: application/json`, body `{"message": <AgentEnvelope JSON, exactly as A2A passes it>,
+  "session_id": "<stage>-<run_id>", "user_id": <caller user>}`. Response
+  `{"success":true,"response":"<envelope>","execution_id":…,"status":"completed"}`. We do not wait for it;
+  `_await_new_run` returns the freshly-registered `runs` document.
+
+`scripts/check_platform_contract.py` mechanically guards the rule: the three start tools must call
+`_invoke_run` and must not call `_a2a_run`.
+
 ## Remaining plan
 
 1. **Allowlist the egress IP on the Atlas API access list** (unblocks all Atlas ops), then re-run the
