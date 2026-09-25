@@ -1,5 +1,7 @@
-"""Coding Orchestrator — plan logic (pure) and graph (fake SDK + faked A2A coders) tests.
-No LLM, no cloud, no platform DB."""
+"""Coding Orchestrator — plan logic (pure) and graph (fake SDK + faked platform_invoke coders) tests.
+No LLM, no cloud, no platform DB. Coders are called as SYNCHRONOUS top-level platform invokes, so the graph
+tests fake poc_shared_tools.platform_invoke.invoke_envelope; the transport itself (token exchange, 401 ->
+refresh + retry) is covered end to end by faking platform_invoke._http."""
 import json
 
 import pytest
@@ -190,8 +192,21 @@ def _coder_handlers(calls):
     return {"generate-api": api, "generate-seed": seed, "generate-frontend": frontend}
 
 
-def _invoke(tool: str, params: dict, handlers: dict | None = None):
-    m.app.a2a_handlers = handlers or {}
+def _fake_coder_invoke(monkeypatch, handlers: dict):
+    """Route platform_invoke.invoke_envelope(skill, env, ...) to the matching coder handler. The handler
+    returns Envelope.succeeded(...) == {"response": {...}}, which is exactly the shape invoke_envelope yields
+    (the platform reply's `response` field carries the callee's AgentEnvelope)."""
+    from poc_shared_tools import platform_invoke as pi
+
+    def fake_invoke_envelope(skill, envelope, *, user_id, session_id, timeout_s=900):
+        return handlers[skill](envelope)
+
+    monkeypatch.setattr(pi, "invoke_envelope", fake_invoke_envelope)
+
+
+def _invoke(tool: str, params: dict, handlers: dict | None = None, monkeypatch=None):
+    if monkeypatch is not None:
+        _fake_coder_invoke(monkeypatch, handlers or {})
     graph = m.build_agent()
     env = Envelope.request(poc_id=POC, run_id=new_id("run"), caller="chat_agent",
                            agent="coding_orchestrator", tool=tool, params=params, task_id=TASK)
@@ -200,9 +215,9 @@ def _invoke(tool: str, params: dict, handlers: dict | None = None):
     return validate("agent_envelope", json.loads(out["messages"][-1].content))["response"]
 
 
-def test_happy_path_builds_three_components(fake_md, fake_s3):
+def test_happy_path_builds_three_components(fake_md, fake_s3, monkeypatch):
     calls = []
-    resp = _invoke("start_code_run", {"poc_id": POC, "spec_version": "v001"}, _coder_handlers(calls))
+    resp = _invoke("start_code_run", {"poc_id": POC, "spec_version": "v001"}, _coder_handlers(calls), monkeypatch)
     assert resp["status"] == "succeeded", resp
     assert resp["result"]["code_version"] == "v001"
     assert resp["result"]["changed_components"] == ["seed", "backend", "frontend"]
@@ -214,12 +229,12 @@ def test_happy_path_builds_three_components(fake_md, fake_s3):
     assert fake_md.pocs[POC]["current_versions"]["code"] == "v001"
 
 
-def test_repair_regenerates_only_failed_component_and_bumps_version(fake_md, fake_s3):
+def test_repair_regenerates_only_failed_component_and_bumps_version(fake_md, fake_s3, monkeypatch):
     fake_s3["next"] = "v002"
     calls = []
     resp = _invoke("repair_component",
                    {"poc_id": POC, "code_version": "v001", "component": "frontend", "failure": FAILURE},
-                   _coder_handlers(calls))
+                   _coder_handlers(calls), monkeypatch)
     assert resp["status"] == "succeeded", resp
     assert resp["result"]["code_version"] == "v002"
     assert resp["result"]["changed_components"] == ["frontend"]
@@ -233,7 +248,7 @@ def test_gate_refused(fake_s3, monkeypatch):
         if not name.startswith("__") and hasattr(real, name):
             monkeypatch.setattr(real, name, getattr(md, name))
     monkeypatch.setattr(real, "_db", md._db)
-    resp = _invoke("start_code_run", {"poc_id": POC, "spec_version": "v009"}, _coder_handlers([]))
+    resp = _invoke("start_code_run", {"poc_id": POC, "spec_version": "v009"}, _coder_handlers([]), monkeypatch)
     assert resp["status"] == "failed" and resp["error"]["code"] == "GATE_NOT_APPROVED"
 
 
@@ -243,7 +258,6 @@ def test_bad_tool():
 
 
 def test_invalid_envelope():
-    m.app.a2a_handlers = {}
     graph = m.build_agent()
     out = graph.invoke({"messages": [HumanMessage(content="not json")]}, config={"configurable": {"thread_id": "t2"}})
     resp = validate("agent_envelope", json.loads(out["messages"][-1].content))["response"]
@@ -251,50 +265,60 @@ def test_invalid_envelope():
 
 
 # =============================================================================
-# A2A token refresh on stale discovery (long-run 401 -> re-mint and retry)
+# Coder calls go through the shared platform_invoke transport; a 401 on invoke
+# forces exactly one token refresh + retry (the ~5-min OE-token expiry, now on a
+# root session so a fresh token is minted, no longer blocks the last coder).
 # =============================================================================
 
-def _stub_app_that_refreshes(calls, first_registry, second_registry):
-    """A minimal app whose a2a_tools() returns a discovery tool; the registry it reports depends on how
-    many times a2a_tools() has been called — call 1 mimics an expired token (empty), call 2 the fresh one."""
-    import json as _json
+def _fake_platform_http(monkeypatch, state):
+    """Fake poc_shared_tools.platform_invoke._http end to end: token -> workspaces -> invoke. The invoke
+    branch returns a coder `succeeded` envelope built from the request, and 401s on the FIRST invoke to
+    exercise the token-refresh-and-retry path. `state` records call counts."""
+    from poc_shared_tools import platform_invoke as pi
+    pi._tokens.clear()
+    pi._ws_map_cache.clear()
+    monkeypatch.setenv("PROJECT_ID", "proj_TEST")
+    monkeypatch.setenv("POC_PLATFORM_SA_CLIENT_ID", "cid_TEST")
+    monkeypatch.setenv("POC_PLATFORM_SA_CLIENT_SECRET", "csecret_TEST")
+    monkeypatch.delenv("POC_WORKSPACE_IDS", raising=False)
+    monkeypatch.delenv("AGENTIC_PLATFORM_BASE_URL", raising=False)
 
-    class _T:
-        def __init__(self, fn, name):
-            self.fn, self.name, self.args = fn, name, {}
-        def invoke(self, call):
-            return self.fn(**(call.get("args", {}) if isinstance(call, dict) else {}))
+    def fake_http(method, url, *, headers=None, data=None, timeout=30):
+        if url.endswith("/oauth/token"):
+            state["token"] += 1
+            return 200, json.dumps({"access_token": f"tok-{state['token']}", "expires_in": 3600}).encode()
+        if url.endswith("/workspaces?limit=200"):
+            return 200, json.dumps({"workspaces": [
+                {"workspace_id": "ws-api", "name": "api-agent"},
+                {"workspace_id": "ws-seed", "name": "data-seeding-agent"},
+                {"workspace_id": "ws-fe", "name": "frontend-agent"},
+            ]}).encode()
+        if "/invoke" in url:
+            state["invoke"] += 1
+            if state["invoke"] == 1:  # first coder call: expired token -> 401 -> one refresh + retry
+                return 401, b'{"error":"unauthorized"}'
+            req = json.loads(json.loads(data)["message"])["request"]
+            cv = req["params"]["code_version"]
+            key = f"pocs/{POC}/code/{cv}/{req.get('mode', 'code')}/"
+            inner = Envelope.succeeded(req["task_id"], {"ok": True}, [Envelope.artifact("code", key, cv)])
+            return 200, json.dumps({"success": True, "response": json.dumps(inner), "status": "completed"}).encode()
+        raise AssertionError(f"unexpected URL {url}")
 
-    class _App:
-        def a2a_tools(self):
-            calls["n"] += 1
-            registry = first_registry if calls["n"] == 1 else second_registry
-
-            def discover_available_agents():
-                return _json.dumps(registry)
-            return [_T(discover_available_agents, "discover_available_agents")]
-    return _App()
-
-
-def test_find_agent_refreshes_token_when_discovery_is_stale():
-    """First discovery is empty (expired A2A token -> 401 -> nothing); find_agent must re-mint the token
-    (a fresh a2a_tools()) and retry, then match. This is the frontend-coder-not-found case on a long run."""
-    from agent_coding_orchestrator.a2a import A2AClient
-    calls = {"n": 0}
-    full = [{"name": "frontend-agent", "id": "ws-fe", "skills": ["generate-frontend"]}]
-    c = A2AClient(_stub_app_that_refreshes(calls, first_registry=[], second_registry=full))
-    agent = c.find_agent("generate-frontend")
-    assert agent["id"] == "ws-fe"
-    assert calls["n"] == 2  # refreshed exactly once after the empty first discovery
+    monkeypatch.setattr(pi, "_http", fake_http)
 
 
-def test_find_agent_refreshes_only_once_then_raises_for_absent_agent():
-    from agent_coding_orchestrator.a2a import A2AClient
-    calls = {"n": 0}
-    c = A2AClient(_stub_app_that_refreshes(calls, first_registry=[], second_registry=[]))
-    try:
-        c.find_agent("generate-frontend")
-        assert False, "expected RuntimeError for a genuinely absent agent"
-    except RuntimeError as e:
-        assert "generate-frontend" in str(e)
-    assert calls["n"] == 2  # one refresh, then give up
+def test_coders_go_through_platform_invoke_and_refresh_token_on_401(fake_md, fake_s3, monkeypatch):
+    state = {"token": 0, "invoke": 0}
+    _fake_platform_http(monkeypatch, state)
+    graph = m.build_agent()
+    env = Envelope.request(poc_id=POC, run_id=new_id("run"), caller="chat_agent",
+                           agent="coding_orchestrator", tool="start_code_run",
+                           params={"poc_id": POC, "spec_version": "v001"}, task_id=TASK)
+    out = graph.invoke({"messages": [HumanMessage(content=json.dumps(env))]},
+                       config={"configurable": {"thread_id": "t401"}})
+    resp = validate("agent_envelope", json.loads(out["messages"][-1].content))["response"]
+    assert resp["status"] == "succeeded", resp
+    # 4 coder steps (contract, seed, backend, frontend); the first 401s and retries → 5 invoke attempts.
+    assert state["invoke"] == 5
+    # exactly two token exchanges: the initial mint + one forced refresh after the 401 (not once per coder).
+    assert state["token"] == 2

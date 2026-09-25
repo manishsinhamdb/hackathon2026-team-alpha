@@ -6,10 +6,12 @@ every reply is an AgentEnvelope response (JSON). Tools:
     start_code_run(poc_id, spec_version) · repair_component(poc_id, code_version, component, failure)
     get_code_bundle(poc_id, code_version)
 
-For start/repair the graph runs the three coder agents over A2A (skills generate-api / generate-seed /
+For start/repair the graph runs the three coder agents (skills generate-api / generate-seed /
 generate-frontend) in order — contract → seed → backend → frontend — assembles the versioned bundle and
-finalizes. Each A2A call is one task and one run step. The orchestrator replies `succeeded` at the END;
-a caller whose A2A call times out should find the run by {"stage":"code","poc_id":...} newest first and poll it.
+finalizes. Each coder is called SYNCHRONOUSLY as a TOP-LEVEL platform invocation (its own root session with a
+fresh token), not an A2A child, because a full 4-coder run (~6 min) outlives the ~5-min OE A2A token. Each
+call is one task and one run step. The orchestrator replies `succeeded` at the END; a caller whose own call
+times out should find the run by {"stage":"code","poc_id":...} newest first and poll it.
 
     RUNNER_MODE=aer   -> LangGraph execution (this graph)
     RUNNER_MODE=tool  -> Tool functions below
@@ -30,8 +32,9 @@ from langgraph.graph.state import CompiledStateGraph
 from agent_engine_sdk_langgraph import App
 
 from poc_contracts import ContractError, Envelope, new_id, validate
+from poc_shared_tools import platform_invoke
 from agent_coding_orchestrator import pipeline
-from agent_coding_orchestrator.a2a import A2AClient, invoke_tool
+from agent_coding_orchestrator.a2a import invoke_tool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%H:%M:%S", stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -43,7 +46,10 @@ app = App(app_name=APP_NAME)
 logger.info("✅ App created")
 
 STACK = {"backend": "node-express", "frontend": "react-vite", "database": "mongodb"}
-CODER_TIMEOUT_S = 280
+# Coders are called as TOP-LEVEL platform invocations (each its own root session with a fresh token), not
+# A2A children, because a full code run (4 coders) outlives the ~5-min OE A2A token. The call is synchronous
+# — it blocks for the coder's whole reply (~35-70 s) — so the client timeout is generous.
+CODER_INVOKE_TIMEOUT_S = 900
 
 
 # =============================================================================
@@ -257,7 +263,6 @@ def _last_human_text(messages: list[BaseMessage]) -> str:
 def build_agent() -> CompiledStateGraph:
     logger.info("Building Coding Orchestrator graph...")
     tools = {t.name: t for t in app.get_tools()}
-    a2a = A2AClient(app)
 
     def call(name: str, **kw: Any) -> dict[str, Any]:
         out = invoke_tool(tools[name], kw)
@@ -309,6 +314,7 @@ def build_agent() -> CompiledStateGraph:
             return {}
         req = state["request"]
         run_id, poc_id, code_version = state["run_id"], state["poc_id"], state["code_version"]
+        user_id = app.get_current_user_id() or "u_local"
         for step in state["plan"]["steps"]:
             bt = call("orch_begin_task", run_id=run_id, poc_id=poc_id, step_json=json.dumps(step))
             task_id = bt["task_id"]
@@ -320,8 +326,12 @@ def build_agent() -> CompiledStateGraph:
             env = Envelope.request(poc_id=poc_id, run_id=run_id, caller=AGENT_NAME, agent=step["agent"],
                                    tool=step["tool"], mode=step["mode"], params=params, task_id=task_id,
                                    trace_id=req.get("trace_id"))
+            # TOP-LEVEL synchronous invoke of the coder workspace (its own root session, fresh token), not an
+            # A2A child: a full 4-coder run outlives the ~5-min OE A2A token, which 401'd the last coder.
             try:
-                resp = a2a.invoke(a2a.find_agent(step["skill"]), env, timeout_s=CODER_TIMEOUT_S)["response"]
+                resp = platform_invoke.invoke_envelope(
+                    step["skill"], env, user_id=user_id, session_id=f"code-{run_id}-{step['step']}",
+                    timeout_s=CODER_INVOKE_TIMEOUT_S)["response"]
             except Exception as e:
                 call("orch_end_task", run_id=run_id, task_id=task_id, step=step["step"], status="failed")
                 return _fail_run(state, "CODER_UNAVAILABLE", f"{step['step']} call failed: {str(e)[:300]}")
