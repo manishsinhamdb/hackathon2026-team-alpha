@@ -295,6 +295,41 @@ New module `agent_chat_agent/platform_invoke.py` (stdlib `urllib`, no new deps).
 `scripts/check_platform_contract.py` mechanically guards the rule: the three start tools must call
 `_invoke_run` and must not call `_a2a_run`.
 
+### Two operational findings from the live cloud run (2026-09-25)
+
+1. **The synchronous invoke gateway caps a turn at ~60 s (HTTP 504).** A non-streaming
+   `POST /workspaces/<id>/invoke` (and the CLI without `--stream`, and the Playground) returns **504 at
+   ~60 s** if the agent turn has not finished. The chat **draft turn** (chat→draft A2A + summarise, ~2.5 min)
+   exceeds that. The chat *root* session keeps running server-side past the 504 (the POC advanced to
+   `spec_ready`), but the HTTP response is lost and — because chat is `durable_workflow:false` — the pod is
+   recycled at the cap, cancelling the in-flight draft A2A child. **Fix for driving the demo: use
+   `agentic invoke --stream`** (or `/invokeStream`); streaming keeps the connection alive through a long
+   turn. Verified: the draft turn completed cleanly over `--stream` (spec v001, no 504). The stage-start
+   turns (code/deploy/teardown) now fast-ack in <60 s so they are fine either way.
+
+2. **BLOCKER — the A2A/OE bearer token has a ~5-minute lifetime and cannot be refreshed from app code.**
+   With the chat→orchestrator fix in place the orchestrator finally runs the **whole** coder chain in the
+   cloud (contract→seed→backend→frontend) instead of dying after contract — and that exposed a latent cap:
+   a full code run is ~5.5–6 min (4 coder calls × ~1.5 min), which **outlives the orchestrator's A2A token**.
+   The SDK mints the token once when the A2A client is first created (`A2A client created for OE …`, logged
+   exactly once per run) and caches the client at the `App` level. Around the 5-minute mark
+   `GET …/a2a/discover?limit=50` returns **401 Unauthorized**, discovery comes back empty, and
+   `find_agent("generate-frontend")` raises `no A2A agent matching 'generate-frontend'` on the **last** coder
+   (contract/seed/backend all land inside the window). Evidence (three runs): token minted `10:55:59`, first
+   401 at `11:01:03` (5m04s later). **An app-level workaround does not work:** `find_agent` now drops the
+   cached tools and re-calls `app.a2a_tools()` on a no-match and retries once (committed, with unit tests, in
+   coding-orchestrator and deploy-agent), but the retry **401s again immediately** and no new client is
+   created — re-calling `a2a_tools()` reuses the cached OE client + expired token. The real SDK that owns the
+   token is cloud-only (ECR not readable with POC-builder keys), so the refresh path is not reachable from
+   here. **This is a platform cap** (analogous to the 300 s A2A ceiling): any A2A call chain that runs longer
+   than ~5 min will 401 on later calls. It blocks the cloud code stage at the frontend coder, and would block
+   the deploy stage's deploy→test lookup at the end of a long deploy run. Per the task guardrail we stop and
+   report rather than re-architect orchestrator→coders (explicitly "stays A2A") onto top-level invoke.
+   **Open question for the platform/SDK owners:** how does an agent refresh or extend the OE A2A token
+   mid-run — is there an `App` method to force OE-client/token recreation, a longer-TTL/refresh config, or
+   must a >5-min multi-call A2A chain be re-architected (e.g. coders started as top-level invokes + run-doc
+   polling, like chat now starts the orchestrator)?
+
 ## Remaining plan
 
 1. **Allowlist the egress IP on the Atlas API access list** (unblocks all Atlas ops), then re-run the

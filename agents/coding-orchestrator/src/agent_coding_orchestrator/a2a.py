@@ -34,13 +34,14 @@ class A2AClient:
         return self._tools
 
     def refresh(self) -> None:
-        """Re-create the A2A tools so the SDK re-mints the orchestrator's OE auth token.
+        """Drop the cached A2A tools and re-fetch them from app.a2a_tools().
 
-        That token expires roughly 5 minutes into a run (confirmed: /a2a/discover returns 401 on the last
-        coder of a full code run — contract/seed/backend land inside the window, frontend does not). The
-        A2AClient is built once at graph start and _load() caches its tools for the whole run, so the cached
-        token goes stale. Dropping the cache and re-calling app.a2a_tools() forces a fresh token. See
-        docs/06 'Platform execution model' → A2A token lifetime."""
+        Guards against a genuinely transient discovery blip. NOTE (confirmed live 2026-09-25): this does
+        NOT fix the ~5-minute OE token expiry — the SDK mints the OE bearer token once when the A2A client
+        is first created and caches that client at the App level, so re-calling app.a2a_tools() reuses the
+        same expired token and /a2a/discover 401s again immediately. Refreshing the OE token mid-run needs
+        an SDK-level mechanism we cannot reach from app code. See docs/06 'Platform execution model' → the
+        A2A token-lifetime BLOCKER."""
         self._load(force=True)
 
     def _find(self, *names: str):

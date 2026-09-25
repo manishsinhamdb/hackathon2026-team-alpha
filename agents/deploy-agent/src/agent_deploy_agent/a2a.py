@@ -34,10 +34,11 @@ class A2AClient:
         return self._tools
 
     def refresh(self) -> None:
-        """Re-create the A2A tools so the SDK re-mints the deploy agent's OE auth token, which expires
-        roughly 5 minutes into a run (/a2a/discover returns 401 after that). The deploy agent looks up the
-        test agent ('e2e-tests') at the end of a long deploy run, so it can hit the expired token just like
-        the orchestrator hits it on the frontend coder. See docs/06 'Platform execution model'."""
+        """Drop the cached A2A tools and re-fetch them from app.a2a_tools() — a guard against a transient
+        discovery blip. NOTE (confirmed live 2026-09-25): this does NOT fix the ~5-minute OE token expiry;
+        re-calling app.a2a_tools() reuses the SDK's cached OE client + expired token and 401s again. The
+        deploy agent looks up the test agent ('e2e-tests') at the end of a long deploy run and would hit the
+        same cap the orchestrator hits on the frontend coder. See docs/06 'Platform execution model'."""
         self._load(force=True)
 
     def _find(self, *names: str):
