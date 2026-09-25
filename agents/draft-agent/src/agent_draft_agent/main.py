@@ -8,10 +8,18 @@ every reply is an AgentEnvelope response (JSON). Entry point / tool:
 A transcript becomes spec/v{NNN}/{poc_spec.md, schema_design.json, query_patterns.json, clarifications.json},
 or the agent replies needs_clarification with <=5 questions.
 
-The LLM generation + all S3 / platform-DB I/O run in the Tool Pod (draft_load / draft_analyze /
-draft_questions / draft_generate / draft_finalize). The graph orchestrates:
-    parse -> load -> analyze -> (questions | generate -> finalize) -> reply
-and records run steps under stage "draft" like the other agents.
+The LLM generation + all S3 / platform-DB I/O run in the Tool Pod (draft_start_run / draft_load /
+draft_analyze / draft_questions / draft_generate / draft_finalize / draft_finish_run). The graph
+orchestrates:
+    parse -> start_run -> load -> analyze -> (questions | generate -> finalize) -> reply
+
+Like the other durable stages, the Draft Agent REGISTERS A RUN DOCUMENT at graph start (stage "draft",
+status running, one-running-per-stage index) and FINISHES it (succeeded / failed). This is what lets the
+Chat Agent START drafting as a top-level platform invoke (its own root session) and POLL the run document
+instead of blocking on an A2A call for the whole ~2-4 min draft — the synchronous A2A/invoke path used to
+hit the 300 s / ~60 s ceilings and lose the spec when the parent turn was cancelled. When the draft returns
+clarification questions the run finishes `succeeded` carrying the questions in outputs (so "how's it going?"
+can surface them); when it drafts/force-drafts the run finishes `succeeded` and the POC is set spec_ready.
 
     RUNNER_MODE=aer   -> LangGraph execution (this graph)
     RUNNER_MODE=tool  -> Tool functions below
@@ -205,6 +213,51 @@ def draft_finalize(envelope_json: str, spec_version: str, spec_key: str, poc_def
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:400]}})
 
 
+@app.tool(timeout=60)
+def draft_start_run(envelope_json: str) -> str:
+    """Register the draft run document at graph start (stage "draft", status running) so a caller who fired
+    this agent as a top-level invoke can watch the run instead of blocking on the reply. Sets the POC to
+    `drafting`. Returns {"run_id", "poc_id"} or {"error": {...}} (INVALID_ENVELOPE / RUN_ALREADY_ACTIVE)."""
+    from poc_shared_tools import metadata as md
+    from poc_shared_tools.errors import ToolError
+    try:
+        env = validate("agent_envelope", json.loads(envelope_json))["request"]
+        poc_id = env["poc_id"]
+        p = env.get("params", {})
+        inputs = {"transcript_key": p.get("transcript_key") or f"pocs/{poc_id}/input/transcript.txt",
+                  "force_assumptions": bool(p.get("force_assumptions")),
+                  "has_answers": bool(p.get("answers"))}
+        run = md.create_run(poc_id, "draft", env.get("caller", "chat_agent"), AGENT_NAME, inputs, env.get("trace_id"))
+        md.set_run_status(run["run_id"], "running")
+        md.update_poc_status(poc_id, "drafting")
+        return json.dumps({"run_id": run["run_id"], "poc_id": poc_id})
+    except (ContractError, KeyError, ValueError) as e:
+        return json.dumps({"error": {"code": "INVALID_ENVELOPE", "message": str(e)[:400]}})
+    except ToolError as e:
+        return json.dumps({"error": {"code": e.code, "message": str(e)[:800], "retryable": e.retryable}})
+    except Exception as e:  # pragma: no cover - defensive
+        return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:400]}})
+
+
+@app.tool(timeout=60)
+def draft_finish_run(run_id: str, status: str, outputs_json: str = "", error_json: str = "") -> str:
+    """Finish the draft run. `succeeded` with outputs {"spec_version": ...} for a drafted spec, or with
+    outputs {"needs_clarification": true, "questions": [...], "round": n} when it returns questions;
+    `failed` with error carries the failure. Returns {"ok": true} (finish failures are non-fatal to the
+    reply, so the caller still gets its envelope)."""
+    from poc_shared_tools import metadata as md
+    from poc_shared_tools.errors import ToolError
+    try:
+        outputs = json.loads(outputs_json) if outputs_json else None
+        error = json.loads(error_json) if error_json else None
+        md.finish_run(run_id, status, outputs=outputs, error=error)
+        return json.dumps({"ok": True})
+    except ToolError as e:
+        return json.dumps({"error": {"code": e.code, "message": str(e)[:400]}})
+    except Exception as e:  # pragma: no cover - defensive
+        return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:400]}})
+
+
 # --- tool helpers ------------------------------------------------------------
 
 def _load_pending_rounds(s3t: Any, poc_id: str) -> list[dict[str, Any]]:
@@ -236,6 +289,7 @@ def _fold_answers(rounds: list[dict[str, Any]], answers: list[dict[str, Any]]) -
 
 class _Opt(TypedDict, total=False):
     request: dict[str, Any]
+    run_id: str
     transcript: str
     prior_rounds: list[dict[str, Any]]
     round_no: int
@@ -281,6 +335,21 @@ def build_agent() -> CompiledStateGraph:
     def _envelope_json(state: DraftState) -> str:
         return json.dumps({"request": state["request"]})
 
+    def _finish(state: DraftState, status: str, outputs: dict[str, Any] | None = None,
+                error: dict[str, Any] | None = None) -> None:
+        """Finish the draft run (best-effort; a finish failure never blocks the reply)."""
+        run_id = state.get("run_id")
+        if not run_id:
+            return
+        call("draft_finish_run", run_id=run_id, status=status,
+             outputs_json=json.dumps(outputs) if outputs else "",
+             error_json=json.dumps(error) if error else "")
+
+    def fail(state: DraftState, response: dict[str, Any]) -> dict[str, Any]:
+        """Finish the run as failed (if one was registered) and reply with the failure envelope."""
+        _finish(state, "failed", error=response["response"].get("error"))
+        return reply(state, response)
+
     # -- parse ---------------------------------------------------------------
     def parse_node(state: DraftState) -> dict[str, Any]:
         text = _last_human_text(state["messages"])
@@ -292,6 +361,21 @@ def build_agent() -> CompiledStateGraph:
             return reply(state, Envelope.failed(env["task_id"], "BAD_TOOL", env.get("tool", "")))
         return {"request": env, "done": False, "usage": {"input_tokens": 0, "output_tokens": 0}}
 
+    # -- start_run -----------------------------------------------------------
+    def start_run_node(state: DraftState) -> dict[str, Any]:
+        """Register the draft run document before any long work, so a caller can poll it. No run exists yet,
+        so a failure here just replies (nothing to finish)."""
+        if state.get("done"):
+            return {}
+        req = state["request"]
+        r = call("draft_start_run", envelope_json=_envelope_json(state))
+        if "error" in r:
+            e = r["error"]
+            return reply(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False)))
+        # Thread the platform run id through state so we can finish the run later. (S3 writes keep the
+        # envelope's own run_id for provenance; the caller finds the run via the runs collection, not S3.)
+        return {"run_id": r["run_id"]}
+
     # -- load ----------------------------------------------------------------
     def load_node(state: DraftState) -> dict[str, Any]:
         if state.get("done"):
@@ -300,7 +384,7 @@ def build_agent() -> CompiledStateGraph:
         r = call("draft_load", envelope_json=_envelope_json(state))
         if "error" in r:
             e = r["error"]
-            return reply(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False)))
+            return fail(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False)))
         return {"transcript": r["transcript"], "prior_rounds": r["prior_rounds"], "round_no": r["round_no"]}
 
     # -- analyze -------------------------------------------------------------
@@ -312,8 +396,8 @@ def build_agent() -> CompiledStateGraph:
                  transcript=state["transcript"], prior_rounds_json=json.dumps(state["prior_rounds"]))
         if "error" in r:
             e = r["error"]
-            return reply(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False),
-                                                e.get("detail")))
+            return fail(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False),
+                                               e.get("detail")))
         return {"extraction": r["extraction"], "missing": r["missing"],
                 "usage": _add_usage(state.get("usage"), r.get("usage"))}
 
@@ -335,11 +419,15 @@ def build_agent() -> CompiledStateGraph:
                  round_no=state["round_no"], prior_rounds_json=json.dumps(state["prior_rounds"]))
         if "error" in r:
             e = r["error"]
-            return reply(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False),
-                                                e.get("detail")))
+            return fail(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False),
+                                               e.get("detail")))
         usage = _add_usage(state.get("usage"), r.get("usage"))
         resp = Envelope.needs_clarification(req["task_id"], r["questions"])
         resp["response"]["usage"] = usage
+        # Finish the run succeeded, carrying the questions so "how's it going?" can surface them. The pending
+        # clarifications S3 file is still written by draft_questions (unchanged) for the next round.
+        _finish(state, "succeeded", outputs={"needs_clarification": True, "questions": r["questions"],
+                                             "round": state["round_no"]})
         return {"messages": [AIMessage(content=json.dumps(resp))], "done": True, "result": resp}
 
     # -- generate ------------------------------------------------------------
@@ -349,8 +437,8 @@ def build_agent() -> CompiledStateGraph:
                  extraction_json=json.dumps(state["extraction"]), prior_rounds_json=json.dumps(state["prior_rounds"]))
         if "error" in r:
             e = r["error"]
-            return reply(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False),
-                                                e.get("detail")))
+            return fail(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False),
+                                               e.get("detail")))
         return {"spec_version": r["spec_version"], "spec_key": r["spec_key"],
                 "poc_definitions": r["poc_definitions"],
                 "usage": _add_usage(state.get("usage"), r.get("usage")),
@@ -366,7 +454,7 @@ def build_agent() -> CompiledStateGraph:
                  spec_key=state["spec_key"], poc_definitions_json=json.dumps(state["poc_definitions"]))
         if "error" in r:
             e = r["error"]
-            return reply(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False)))
+            return fail(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False)))
         keys = gen["keys"]
         version = state["spec_version"]
         artifacts = [
@@ -377,17 +465,21 @@ def build_agent() -> CompiledStateGraph:
         ]
         result = {"spec_version": version, "assumptions": gen["assumptions"],
                   "user_story_count": gen["user_story_count"]}
+        # draft_finalize already set the POC spec_ready + current spec version; finish the run succeeded.
+        _finish(state, "succeeded", outputs={"spec_version": version, "user_story_count": gen["user_story_count"]})
         return reply(state, Envelope.succeeded(req["task_id"], result, artifacts, usage=state.get("usage") or None))
 
     b = StateGraph(DraftState)
     b.add_node("parse", parse_node)
+    b.add_node("start_run", start_run_node)
     b.add_node("load", load_node)
     b.add_node("analyze", analyze_node)
     b.add_node("questions", questions_node)
     b.add_node("generate", generate_node)
     b.add_node("finalize", finalize_node)
     b.add_edge(START, "parse")
-    b.add_conditional_edges("parse", lambda s: "end" if s.get("done") else "load", {"load": "load", "end": END})
+    b.add_conditional_edges("parse", lambda s: "end" if s.get("done") else "start_run", {"start_run": "start_run", "end": END})
+    b.add_conditional_edges("start_run", lambda s: "end" if s.get("done") else "load", {"load": "load", "end": END})
     b.add_conditional_edges("load", lambda s: "end" if s.get("done") else "analyze", {"analyze": "analyze", "end": END})
     b.add_conditional_edges("analyze", decide, {"questions": "questions", "generate": "generate", "end": END})
     b.add_edge("questions", END)

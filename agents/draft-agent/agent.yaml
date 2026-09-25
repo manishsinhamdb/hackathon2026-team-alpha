@@ -1,5 +1,6 @@
-# Draft Agent — POC Builder Stage 1 (Spec §6.2). Called by the Chat Agent over A2A with an
-# AgentEnvelope JSON body; turns a transcript into spec artifacts and poc_definitions.
+# Draft Agent — POC Builder Stage 1 (Spec §6.2). STARTED by the Chat Agent as a top-level platform invoke
+# (its own root session) with an AgentEnvelope JSON body; registers a draft run document the caller polls,
+# and turns a transcript into spec artifacts and poc_definitions.
 name: draft-agent
 entrypoint: agent_draft_agent.main:app
 framework: langgraph
@@ -16,11 +17,13 @@ sandboxes:
   tool:
     secrets: ["*"]
     tools:
+      - draft_start_run
       - draft_load
       - draft_analyze
       - draft_questions
       - draft_generate
       - draft_finalize
+      - draft_finish_run
     network:
       egress_mode: allow_all
 version: 0.1.0

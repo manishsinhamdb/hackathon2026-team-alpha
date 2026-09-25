@@ -233,10 +233,34 @@ def _invoke(params: dict):
 
 
 @pytest.fixture
-def fake_io(monkeypatch):
-    """Fake S3 + metadata + rag so the Tool Pod tools run without cloud."""
-    import poc_shared_tools.s3 as s3
+def fake_meta(monkeypatch):
+    """Fake the platform-DB run/POC calls the graph makes (start_run, finish_run, finalize side effects).
+    Returns a log capturing the run lifecycle so tests can assert registration + finish."""
     import poc_shared_tools.metadata as metadata
+    log: dict[str, list] = {"created": [], "finished": []}
+
+    def fake_create_run(poc_id, stage, requested_by, started_by_agent, inputs=None, trace_id=None):
+        log["created"].append({"poc_id": poc_id, "stage": stage, "inputs": inputs, "by": requested_by})
+        return {"run_id": "run_test", "poc_id": poc_id, "stage": stage, "status": "queued"}
+
+    def fake_finish_run(run_id, status, outputs=None, error=None):
+        log["finished"].append({"run_id": run_id, "status": status, "outputs": outputs, "error": error})
+        return {"run_id": run_id, "status": status}
+
+    monkeypatch.setattr(metadata, "create_run", fake_create_run)
+    monkeypatch.setattr(metadata, "set_run_status", lambda *a, **k: None)
+    monkeypatch.setattr(metadata, "finish_run", fake_finish_run)
+    monkeypatch.setattr(metadata, "set_current_version", lambda *a, **k: None)
+    monkeypatch.setattr(metadata, "update_poc_status", lambda *a, **k: None)
+    monkeypatch.setattr(metadata, "get_poc", lambda poc_id: {"owner_user_id": "u_test"})
+    return log
+
+
+@pytest.fixture
+def fake_io(monkeypatch, fake_meta):
+    """Fake S3 + metadata + rag so the Tool Pod tools run without cloud.
+    Returns {"puts": [(key, body)], "meta": <run lifecycle log>}."""
+    import poc_shared_tools.s3 as s3
     from poc_shared_tools.errors import ToolError
 
     puts: list[tuple[str, str]] = []
@@ -257,11 +281,8 @@ def fake_io(monkeypatch):
     monkeypatch.setattr(s3, "get_text", fake_get_text)
     monkeypatch.setattr(s3, "put_object", fake_put_object)
     monkeypatch.setattr(s3, "next_version", lambda poc_id, kind: "v001")
-    monkeypatch.setattr(metadata, "set_current_version", lambda *a, **k: None)
-    monkeypatch.setattr(metadata, "update_poc_status", lambda *a, **k: None)
-    monkeypatch.setattr(metadata, "get_poc", lambda poc_id: {"owner_user_id": "u_test"})
     monkeypatch.setattr(rag, "upsert_spec_embeddings", lambda *a, **k: 3)
-    return puts
+    return {"puts": puts, "meta": fake_meta}
 
 
 def test_graph_needs_clarification(fake_io, monkeypatch):
@@ -283,10 +304,33 @@ def test_graph_needs_clarification(fake_io, monkeypatch):
     fields = {q["field"] for q in qs}
     assert {"success_criteria", "data_entities"} <= fields
     # persisted to the pending clarifications file
-    pending = [(k, b) for k, b in fake_io if "pending" in k]
+    pending = [(k, b) for k, b in fake_io["puts"] if "pending" in k]
     assert pending, "questions must be persisted"
     doc = json.loads(pending[-1][1])
     assert doc["rounds"][-1]["round"] == 1
+
+
+def test_graph_needs_clarification_finishes_run_with_questions(fake_io, monkeypatch):
+    """The draft run is registered at start and finished `succeeded` carrying the questions in outputs, so
+    the caller's 'how's it going?' can surface them."""
+    monkeypatch.setattr(pipeline, "analyze",
+                        lambda *a, **k: ({"extraction": {"title": "t"},
+                                          "missing": ["success_criteria", "data_entities"]},
+                                         {"input_tokens": 1, "output_tokens": 1}))
+    monkeypatch.setattr(pipeline, "generate_questions",
+                        lambda *a, **k: ([
+                            {"question_id": "q1-1", "field": "success_criteria", "question": "target?",
+                             "why_it_matters": "tests", "suggestions": ["300ms"]},
+                        ], {"input_tokens": 1, "output_tokens": 1}))
+    _invoke({"poc_id": POC})
+    meta = fake_io["meta"]
+    assert len(meta["created"]) == 1 and meta["created"][0]["stage"] == "draft"
+    assert len(meta["finished"]) == 1
+    fin = meta["finished"][0]
+    assert fin["run_id"] == "run_test" and fin["status"] == "succeeded"
+    assert fin["outputs"]["needs_clarification"] is True
+    assert fin["outputs"]["questions"][0]["question_id"] == "q1-1"
+    assert fin["outputs"]["round"] == 1
 
 
 def test_graph_force_assumptions_drafts_despite_missing(fake_io, monkeypatch):
@@ -310,12 +354,28 @@ def test_graph_drafted_writes_four_artifacts(fake_io, monkeypatch):
     assert resp["result"]["spec_version"] == "v001"
     assert resp["result"]["user_story_count"] == 3
     # the four spec files were written
-    written = [k for k, _ in fake_io if "/spec/v001/" in k]
+    written = [k for k, _ in fake_io["puts"] if "/spec/v001/" in k]
     assert any(k.endswith("poc_spec.md") for k in written)
     assert any(k.endswith("clarifications.json") for k in written)
 
 
-def test_graph_invalid_transcript(monkeypatch):
+def test_graph_drafted_registers_and_finishes_run_succeeded(fake_io, monkeypatch):
+    """A drafted spec registers a draft run at start and finishes it `succeeded` with the spec_version."""
+    monkeypatch.setattr(pipeline, "analyze",
+                        lambda *a, **k: ({"extraction": {}, "missing": []}, {"input_tokens": 1, "output_tokens": 1}))
+    monkeypatch.setattr(pipeline, "generate", lambda *a, **k: (_gen_result(), {"input_tokens": 2, "output_tokens": 2}))
+    _invoke({"poc_id": POC})
+    meta = fake_io["meta"]
+    assert len(meta["created"]) == 1
+    created = meta["created"][0]
+    assert created["stage"] == "draft" and created["poc_id"] == POC
+    assert len(meta["finished"]) == 1
+    fin = meta["finished"][0]
+    assert fin["status"] == "succeeded" and fin["outputs"]["spec_version"] == "v001"
+    assert any("/spec/v001/" in k for k, _ in fake_io["puts"])
+
+
+def test_graph_invalid_transcript(fake_meta, monkeypatch):
     import poc_shared_tools.s3 as s3
     from poc_shared_tools.errors import ToolError
 
@@ -326,6 +386,11 @@ def test_graph_invalid_transcript(monkeypatch):
     resp = _invoke({"poc_id": POC})
     assert resp["status"] == "failed"
     assert resp["error"]["code"] == "INVALID_TRANSCRIPT"
+    # the run was registered at start, then finished failed with the same error
+    assert len(fake_meta["created"]) == 1
+    assert len(fake_meta["finished"]) == 1
+    fin = fake_meta["finished"][0]
+    assert fin["status"] == "failed" and fin["error"]["code"] == "INVALID_TRANSCRIPT"
 
 
 def test_graph_invalid_envelope():
