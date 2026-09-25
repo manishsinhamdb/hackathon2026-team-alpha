@@ -4,33 +4,35 @@ name: coding-orchestrator
 entrypoint: agent_coding_orchestrator.main:app
 framework: langgraph
 features:
-    durable_workflow: true
-    memory: false
+  durable_workflow: true
+  memory: false
 # All orchestration runs in the Tool Pod; the Agent Pod holds no tools.
 sandboxes:
-    agent:
-        secrets: ["*"]
-        tools: []
-    tool:
-        secrets: ["*"]
-        tools:
-            - orch_start_run
-            - orch_load_inputs
-            - orch_begin_task
-            - orch_end_task
-            - orch_assemble
-            - orch_finalize
-            - orch_get_bundle
+  agent:
+    secrets: ["*"]
+    tools: []
+    network:
+      egress_mode: allow_all
+  tool:
+    secrets: ["*"]
+    tools:
+      - orch_start_run
+      - orch_load_inputs
+      - orch_begin_task
+      - orch_end_task
+      - orch_assemble
+      - orch_finalize
+      - orch_get_bundle
+    network:
+      egress_mode: allow_all
 version: 0.1.0
-network:
-    egress_mode: allow_all
 a2a:
-    enabled: true
-    # Fill with the Chat Agent's and Deploy Agent's workspace ids after `agentic init` (environment-specific, see docs/05_deploying.md).
-    allowed_callers: []
-    skills:
-        - name: code-orchestration
-          description: "Runs the three coding sub-agents in parallel from spec artifacts, assembles the versioned bundle, and exposes a single repair entry point for the Deploy Agent. Input and output are AgentEnvelope JSON (tools start_code_run, repair_component, get_code_bundle)."
-          example_input: '{"request": {"poc_id": "poc_...", "run_id": "run_...", "task_id": "task_...", "caller": "chat_agent", "agent": "coding_orchestrator", "tool": "start_code_run", "params": {"poc_id": "poc_...", "spec_version": "v001"}}}'
-    input_modes: ["text/plain"]
-    output_modes: ["text/plain"]
+  enabled: true
+  # Fill with the Chat Agent's and Deploy Agent's workspace ids after `agentic init` (environment-specific, see docs/05_deploying.md).
+  allowed_callers: []
+  skills:
+    - name: code-orchestration
+      description: "Runs the three coding sub-agents in parallel from spec artifacts, assembles the versioned bundle, and exposes a single repair entry point for the Deploy Agent. Input and output are AgentEnvelope JSON (tools start_code_run, repair_component, get_code_bundle)."
+      example_input: '{"request": {"poc_id": "poc_...", "run_id": "run_...", "task_id": "task_...", "caller": "chat_agent", "agent": "coding_orchestrator", "tool": "start_code_run", "params": {"poc_id": "poc_...", "spec_version": "v001"}}}'
+  input_modes: ["text/plain"]
+  output_modes: ["text/plain"]

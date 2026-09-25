@@ -4,27 +4,29 @@ name: api-agent
 entrypoint: agent_api_agent.main:app
 framework: langgraph
 features:
-    durable_workflow: true
-    memory: false
+  durable_workflow: true
+  memory: false
 # All generation runs in the Tool Pod; the Agent Pod holds no tools.
 sandboxes:
-    agent:
-        secrets: ["*"]
-        tools: []
-    tool:
-        secrets: ["*"]
-        tools:
-            - api_execute
+  agent:
+    secrets: ["*"]
+    tools: []
+    network:
+      egress_mode: allow_all
+  tool:
+    secrets: ["*"]
+    tools:
+      - api_execute
+    network:
+      egress_mode: allow_all
 version: 0.1.0
-network:
-    egress_mode: allow_all
 a2a:
-    enabled: true
-    # Fill with the Coding Orchestrator's workspace id after `agentic init` (environment-specific, see docs/05_deploying.md).
-    allowed_callers: []
-    skills:
-        - name: generate-api
-          description: "Implements the Draft Agent's API contract as an Express + Mongoose Node.js backend with MongoDB query patterns, serving the frontend build. Input and output are AgentEnvelope JSON (tool generate_api)."
-          example_input: '{"request": {"poc_id": "poc_...", "run_id": "run_...", "task_id": "task_...", "caller": "coding_orchestrator", "agent": "api_agent", "tool": "generate_api", "params": {"poc_id": "poc_...", "code_version": "v001", "mode": "generate", "inputs": {"spec_key": "pocs/poc_.../spec/v001/poc_spec.md", "api_contract_key": "pocs/poc_.../spec/v001/api_contract.yaml"}}}}'
-    input_modes: ["text/plain"]
-    output_modes: ["text/plain"]
+  enabled: true
+  # Fill with the Coding Orchestrator's workspace id after `agentic init` (environment-specific, see docs/05_deploying.md).
+  allowed_callers: []
+  skills:
+    - name: generate-api
+      description: "Implements the Draft Agent's API contract as an Express + Mongoose Node.js backend with MongoDB query patterns, serving the frontend build. Input and output are AgentEnvelope JSON (tool generate_api)."
+      example_input: '{"request": {"poc_id": "poc_...", "run_id": "run_...", "task_id": "task_...", "caller": "coding_orchestrator", "agent": "api_agent", "tool": "generate_api", "params": {"poc_id": "poc_...", "code_version": "v001", "mode": "generate", "inputs": {"spec_key": "pocs/poc_.../spec/v001/poc_spec.md", "api_contract_key": "pocs/poc_.../spec/v001/api_contract.yaml"}}}}'
+  input_modes: ["text/plain"]
+  output_modes: ["text/plain"]

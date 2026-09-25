@@ -4,31 +4,33 @@ name: draft-agent
 entrypoint: agent_draft_agent.main:app
 framework: langgraph
 features:
-    durable_workflow: true
-    memory: false
+  durable_workflow: true
+  memory: false
 # All generation runs in the Tool Pod; the Agent Pod holds no tools.
 sandboxes:
-    agent:
-        secrets: ["*"]
-        tools: []
-    tool:
-        secrets: ["*"]
-        tools:
-            - draft_load
-            - draft_analyze
-            - draft_questions
-            - draft_generate
-            - draft_finalize
+  agent:
+    secrets: ["*"]
+    tools: []
+    network:
+      egress_mode: allow_all
+  tool:
+    secrets: ["*"]
+    tools:
+      - draft_load
+      - draft_analyze
+      - draft_questions
+      - draft_generate
+      - draft_finalize
+    network:
+      egress_mode: allow_all
 version: 0.1.0
-network:
-    egress_mode: allow_all
 a2a:
-    enabled: true
-    # Fill with the Chat Agent's workspace id after `agentic init` (environment-specific, see docs/05_deploying.md).
-    allowed_callers: []
-    skills:
-        - name: draft-spec
-          description: "Turns a meeting transcript into an approval-ready POC specification, schema design, query patterns, API contract, and poc_definitions for RAG. Input and output are AgentEnvelope JSON (tool draft_spec)."
-          example_input: '{"request": {"poc_id": "poc_...", "run_id": "run_...", "task_id": "task_...", "caller": "chat_agent", "agent": "draft_agent", "tool": "draft_spec", "params": {"poc_id": "poc_..."}}}'
-    input_modes: ["text/plain"]
-    output_modes: ["text/plain"]
+  enabled: true
+  # Fill with the Chat Agent's workspace id after `agentic init` (environment-specific, see docs/05_deploying.md).
+  allowed_callers: []
+  skills:
+    - name: draft-spec
+      description: "Turns a meeting transcript into an approval-ready POC specification, schema design, query patterns, API contract, and poc_definitions for RAG. Input and output are AgentEnvelope JSON (tool draft_spec)."
+      example_input: '{"request": {"poc_id": "poc_...", "run_id": "run_...", "task_id": "task_...", "caller": "chat_agent", "agent": "draft_agent", "tool": "draft_spec", "params": {"poc_id": "poc_..."}}}'
+  input_modes: ["text/plain"]
+  output_modes: ["text/plain"]
