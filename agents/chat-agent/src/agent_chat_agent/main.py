@@ -16,9 +16,12 @@ The LLM only ever calls these friendly tools; it never composes AgentEnvelope JS
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import sys
+import threading
+import time
 from typing import Annotated, Any, TypedDict
 
 from dotenv import load_dotenv
@@ -69,9 +72,14 @@ The pipeline and its human-in-the-loop GATES (follow exactly):
 6. START STAGES. After spec_approved: chat_start_code_run(poc_id, spec_version). After code_approved:
    chat_start_deploy_run(poc_id, code_version, options_json) with options
    {"db_mode":"shared_db","run_tests":true,"ttl_hours":4} unless the user says otherwise. Re-run tests with
-   chat_run_tests(poc_id, deployment_run_id). Tear down with chat_teardown(poc_id).
+   chat_run_tests(poc_id, deployment_run_id). Tear down with chat_teardown(poc_id). These start tools return
+   as soon as the run is registered (status "started" + a run_id) — they do NOT wait for the stage to
+   finish. As soon as you have the run_id, reply to the user right away: tell them it started, give the
+   run_id, and invite them to ask "how's it going?" for progress. Never imply a stage is done just because
+   the start tool returned.
 7. PROGRESS + ERRORS. Answer "how's it going?" from chat_get_run_status(run_id) (find the run first with
-   chat_find_run). If a run failed, read the error and offer the next action (retry, tear down, or fix).
+   chat_find_run). Runs finish in the background, so a stage may still be running or already terminal when
+   asked. If a run failed, read the error and offer the next action (retry, tear down, or fix).
 8. STATUS. code run done -> poc status code_ready; deploy+test done -> tested; teardown -> torn_down. Read
    chat_get_poc(poc_id) to confirm status/versions when unsure.
 9. Keep a transcript of the conversation: after the user's message and again before your final reply, call
@@ -252,22 +260,73 @@ def _a2a(skill: str, agent_name: str, tool: str, poc_id: str, params: dict[str, 
                                                                        "error": {"code": "A2A_BAD_REPLY", "message": str(resp)[:300]}}
 
 
+# A stage-start turn must return quickly: the specialists run durably (durable_workflow: true), so they
+# persist a runs document at graph start and keep executing in the OE after this call returns. We therefore
+# wait only long enough to learn the run_id — a short ack window, then a brief poll for the run doc to
+# appear — never for the whole stage. Blocking for the full run made long turns come back as Bad Gateway /
+# empty to the UI while the work carried on unseen; the user now polls progress with chat_get_run_status
+# ("how's it going?"). NOTE: the SDK's invoke_a2a_agent has no timeout parameter and blocks until the callee
+# graph returns (up to the ~300 s A2A ceiling), so the ack window MUST be enforced on our side — we run the
+# A2A call on a daemon thread and stop waiting on it after A2A_ACK_TIMEOUT_S. The abandoned call keeps
+# running harmlessly (the durable callee owns the run either way).
+A2A_ACK_TIMEOUT_S = 8
+A2A_BG_TIMEOUT_S = 290
+RUN_APPEAR_TIMEOUT_S = 25
+RUN_APPEAR_POLL_S = 2
+
+
 def _a2a_run(skill: str, agent_name: str, tool: str, poc_id: str, params: dict[str, Any],
              stage: str) -> dict[str, Any]:
-    """Start a background stage over A2A. On any A2A failure/timeout, fall back to the newest run of that
-    stage (the callee writes its runs document before doing long work). Returns {"status", "run_id"}."""
-    try:
-        resp = _a2a(skill, agent_name, tool, poc_id, params)
-        run_id = _extract_run_id(resp)
+    """Kick off a background stage over A2A and return as soon as its run is registered — do NOT block for
+    the stage to finish. Returns {"status", "run_id", "response"}; the caller reports the run_id and tells
+    the user to poll. If the callee acks synchronously with a run_id we use it; otherwise (the durable callee
+    is still working when the ack window elapses) we watch for the freshly-created runs document (distinct
+    from any prior run of this stage)."""
+    before = (_newest_run(poc_id, stage) or {}).get("run_id")
+    box: dict[str, Any] = {}
+
+    def _call() -> None:
+        try:
+            box["resp"] = _a2a(skill, agent_name, tool, poc_id, params, timeout_s=A2A_BG_TIMEOUT_S)
+        except Exception as e:  # discovery/transport/timeout — the run doc lookup below still recovers it
+            box["error"] = str(e)
+
+    # Copy the current context into the worker so the SDK's A2A machinery (OE callback URL, execution
+    # scope, auth — all carried on contextvars) still works off the main thread. Without this the call
+    # silently fails to leave the process and the callee never runs.
+    ctx = contextvars.copy_context()
+    th = threading.Thread(target=lambda: ctx.run(_call), name=f"a2a-{stage}", daemon=True)
+    th.start()
+    th.join(A2A_ACK_TIMEOUT_S)
+
+    if "resp" in box:
+        run_id = _extract_run_id(box["resp"])
         if run_id:
-            return {"status": resp.get("status", "started"), "run_id": run_id, "response": resp}
-    except Exception as e:  # A2A discovery/timeout/transport
-        logger.warning("A2A %s.%s failed, falling back to run lookup: %s", agent_name, tool, e)
-        resp = {"status": "started", "error": {"code": "A2A_FALLBACK", "message": str(e)[:200]}}
-    found = _newest_run(poc_id, stage)
+            return {"status": box["resp"].get("status", "started"), "run_id": run_id, "response": box["resp"]}
+    if th.is_alive():
+        logger.info("A2A %s.%s still running after %ss ack window; polling for the run document",
+                    agent_name, tool, A2A_ACK_TIMEOUT_S)
+    resp: dict[str, Any] = box.get("resp") or {
+        "status": "started",
+        "error": {"code": "A2A_ACK_TIMEOUT", "message": box.get("error", f"no ack within {A2A_ACK_TIMEOUT_S}s")},
+    }
+    found = _await_new_run(poc_id, stage, before)
     if found:
         return {"status": found.get("status", "started"), "run_id": found.get("run_id"), "response": resp}
-    return {"status": resp.get("status", "started"), "run_id": None, "response": resp}
+    return {"status": resp.get("status", "started"), "run_id": _extract_run_id(resp), "response": resp}
+
+
+def _await_new_run(poc_id: str, stage: str, before_run_id: str | None) -> dict[str, Any] | None:
+    """Poll for a runs document of this stage that is newer than before_run_id (the durable callee writes it
+    at graph start). Returns the run doc, or None if none appeared within RUN_APPEAR_TIMEOUT_S."""
+    deadline = time.time() + RUN_APPEAR_TIMEOUT_S
+    while time.time() < deadline:
+        doc = _newest_run(poc_id, stage)
+        if doc and doc.get("run_id") != before_run_id:
+            return doc
+        time.sleep(RUN_APPEAR_POLL_S)
+    doc = _newest_run(poc_id, stage)
+    return doc if doc and doc.get("run_id") != before_run_id else None
 
 
 def _extract_run_id(resp: dict[str, Any]) -> str | None:

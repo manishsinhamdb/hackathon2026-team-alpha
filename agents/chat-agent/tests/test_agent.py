@@ -84,6 +84,49 @@ def test_chat_find_run_returns_newest(monkeypatch):
 
 
 # =============================================================================
+# fast stage-start (do not block for the whole run)
+# =============================================================================
+
+def test_a2a_run_returns_new_run_without_blocking(monkeypatch):
+    """When the durable callee has not acked by the short ack window, _a2a_run must not wait for the stage;
+    it returns the freshly-registered run document (distinct from any prior run of the stage)."""
+    monkeypatch.setattr(m, "RUN_APPEAR_POLL_S", 0)
+
+    calls = {"n": 0}
+
+    def slow_callee(*a, **k):
+        # simulate the A2A call still running when our ack window elapses
+        raise TimeoutError("callee still running")
+
+    # newest_run: first the stale prior deploy run, then the fresh one the callee just wrote
+    seq = [{"run_id": "run_OLD", "status": "failed"}, {"run_id": "run_NEW", "status": "queued"}]
+
+    def fake_newest(poc_id, stage):
+        calls["n"] += 1
+        return seq[0] if calls["n"] == 1 else seq[1]
+
+    monkeypatch.setattr(m, "_a2a", slow_callee)
+    monkeypatch.setattr(m, "_newest_run", fake_newest)
+    out = m._a2a_run("deploy-operations", "deploy_agent", "start_deploy_run", POC, {}, "deploy")
+    assert out["run_id"] == "run_NEW" and out["status"] == "queued"
+
+
+def test_a2a_run_uses_sync_ack_when_available(monkeypatch):
+    """If the callee acks synchronously with a run_id, use it directly (only the pre-invoke snapshot of
+    _newest_run runs; no post-ack run-doc polling)."""
+    calls = {"n": 0}
+
+    def fake_newest(poc_id, stage):
+        calls["n"] += 1
+        return None  # no prior run
+    monkeypatch.setattr(m, "_a2a", lambda *a, **k: {"status": "started", "result": {"run_id": "run_ACK"}})
+    monkeypatch.setattr(m, "_newest_run", fake_newest)
+    out = m._a2a_run("deploy-operations", "deploy_agent", "start_deploy_run", POC, {}, "deploy")
+    assert out["run_id"] == "run_ACK" and out["status"] == "started"
+    assert calls["n"] == 1  # only the "before" snapshot; no polling after a synchronous ack
+
+
+# =============================================================================
 # scripted graph
 # =============================================================================
 
