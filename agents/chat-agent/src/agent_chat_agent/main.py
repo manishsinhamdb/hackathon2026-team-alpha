@@ -29,7 +29,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
-from magenta_sdklanggraph import App
+from agent_engine_sdk_langgraph import App
 
 from poc_contracts import Envelope, new_id
 from agent_chat_agent.a2a import A2AClient, invoke_tool
@@ -101,7 +101,7 @@ What the user can say (examples):
 # Tool Pod tools (is_local=False) — platform DB + S3
 # =============================================================================
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def chat_create_poc(title: str, transcript_text: str) -> str:
     """Create a new POC (pocs document), store the transcript under pocs/{poc_id}/input/, return {"poc_id"}."""
     from poc_shared_tools import metadata as md, s3 as s3t
@@ -118,7 +118,7 @@ def chat_create_poc(title: str, transcript_text: str) -> str:
     return json.dumps({"poc_id": poc_id, "title": title, "transcript_key": key})
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def chat_get_poc(poc_id: str) -> str:
     """Return the POC document (status, current_versions, approvals) with DB secrets masked."""
     from poc_shared_tools import metadata as md
@@ -126,7 +126,7 @@ def chat_get_poc(poc_id: str) -> str:
     return json.dumps(_mask_secrets(poc), default=str)
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def chat_record_approval(poc_id: str, stage: str, version: str, implicit: bool = False) -> str:
     """Record a HITL gate: stage is 'spec_approved' or 'code_approved'; version is the vNNN being approved."""
     from poc_shared_tools import metadata as md
@@ -135,14 +135,14 @@ def chat_record_approval(poc_id: str, stage: str, version: str, implicit: bool =
     return json.dumps(entry, default=str)
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def chat_get_run_status(run_id: str) -> str:
     """Return {run_id, status, current_step, steps, error, outputs} for a run."""
     from poc_shared_tools import metadata as md
     return json.dumps(md.get_run_status(run_id), default=str)
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def chat_find_run(poc_id: str, stage: str) -> str:
     """Return the newest run of a stage (draft|code|deploy|test|teardown) for a POC, or {"error": ...}."""
     from poc_shared_tools import metadata as md
@@ -157,7 +157,7 @@ def chat_find_run(poc_id: str, stage: str) -> str:
                                                "error", "outputs", "started_at")}, default=str)
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def chat_list_artifacts(poc_id: str, prefix: str = "") -> str:
     """List S3 artifacts under pocs/{poc_id}/{prefix}. Returns [{key, size, last_modified}]."""
     from poc_shared_tools import s3 as s3t
@@ -165,7 +165,7 @@ def chat_list_artifacts(poc_id: str, prefix: str = "") -> str:
     return json.dumps(s3t.list_prefix(full), default=str)
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def chat_read_artifact(key: str) -> str:
     """Read an S3 text artifact (truncated to 6000 chars). Returns {"key", "text", "truncated"}."""
     from poc_shared_tools import s3 as s3t
@@ -173,14 +173,14 @@ def chat_read_artifact(key: str) -> str:
     return json.dumps({"key": key, "text": text[:6000], "truncated": len(text) > 6000})
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def chat_presign(key: str) -> str:
     """Return a presigned GET url for an artifact: {"url"}."""
     from poc_shared_tools import s3 as s3t
     return json.dumps({"url": s3t.presign_get(key)})
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def chat_append_message(poc_id: str, role: str, content: str) -> str:
     """Append a message to the POC conversation history. role is user|assistant|tool."""
     from poc_shared_tools import metadata as md
@@ -192,7 +192,7 @@ def chat_append_message(poc_id: str, role: str, content: str) -> str:
 # Agent Pod tools (is_local=True) — call the specialists over A2A
 # =============================================================================
 
-@app.tool(is_local=True, timeout=290)
+@app.tool(timeout=290)
 def chat_call_draft(poc_id: str, answers_json: str = "", force_assumptions: bool = False) -> str:
     """Draft or refine the spec (sync). Returns the Draft Agent's response JSON
     (status succeeded with spec_version, or needs_clarification with questions, or failed)."""
@@ -208,14 +208,14 @@ def chat_call_draft(poc_id: str, answers_json: str = "", force_assumptions: bool
     return json.dumps(resp, default=str)
 
 
-@app.tool(is_local=True, timeout=290)
+@app.tool(timeout=290)
 def chat_start_code_run(poc_id: str, spec_version: str) -> str:
     """Start the Stage-2 code run (background). Returns {"status", "run_id"}."""
     return json.dumps(_a2a_run("code-orchestration", "coding_orchestrator", "start_code_run", poc_id,
                                {"poc_id": poc_id, "spec_version": spec_version}, "code"), default=str)
 
 
-@app.tool(is_local=True, timeout=290)
+@app.tool(timeout=290)
 def chat_start_deploy_run(poc_id: str, code_version: str, options_json: str = "") -> str:
     """Start the Stage-3/4 deploy run (background). options_json e.g.
     {"db_mode":"shared_db","run_tests":true,"ttl_hours":4}. Returns {"status", "run_id"}."""
@@ -230,7 +230,7 @@ def chat_start_deploy_run(poc_id: str, code_version: str, options_json: str = ""
                       default=str)
 
 
-@app.tool(is_local=True, timeout=290)
+@app.tool(timeout=290)
 def chat_run_tests(poc_id: str, deployment_run_id: str = "") -> str:
     """Re-run the e2e tests on the live deployment (background). Returns {"status", "run_id"}."""
     params: dict[str, Any] = {"poc_id": poc_id}
@@ -239,7 +239,7 @@ def chat_run_tests(poc_id: str, deployment_run_id: str = "") -> str:
     return json.dumps(_a2a_run("e2e-tests", "test_agent", "run_e2e", poc_id, params, "test"), default=str)
 
 
-@app.tool(is_local=True, timeout=290)
+@app.tool(timeout=290)
 def chat_teardown(poc_id: str) -> str:
     """Tear down the POC's cloud resources (background). Returns {"status", "run_id"}."""
     return json.dumps(_a2a_run("deploy-operations", "deploy_agent", "teardown_poc", poc_id,

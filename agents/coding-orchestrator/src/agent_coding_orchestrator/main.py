@@ -27,7 +27,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
-from magenta_sdklanggraph import App
+from agent_engine_sdk_langgraph import App
 
 from poc_contracts import ContractError, Envelope, new_id, validate
 from agent_coding_orchestrator import pipeline
@@ -50,7 +50,7 @@ CODER_TIMEOUT_S = 280
 # Tools — all in the Tool Pod (S3 + platform DB access)
 # =============================================================================
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def orch_start_run(envelope_json: str) -> str:
     """Validate a start_code_run / repair_component envelope, check the code gate, create the run.
     Returns {"run_id", "poc_id", "tool", ...} or {"error": {...}}."""
@@ -82,7 +82,7 @@ def orch_start_run(envelope_json: str) -> str:
         return json.dumps({"error": {"code": e.code, "message": str(e)[:500], "retryable": e.retryable}})
 
 
-@app.tool(is_local=False, timeout=120)
+@app.tool(timeout=120)
 def orch_load_inputs(run_id: str) -> str:
     """Allocate the new code_version, resolve spec_version, compute the coder plan, and (on repair) copy the
     unchanged components + contract from the previous version. Stores ctx+plan in runs.outputs. Returns the plan ctx."""
@@ -128,7 +128,7 @@ def _copy_prefix(s3t: Any, src_base: str, dst_base: str) -> None:
             s3t.copy_object(obj["key"], dst_base + rel)
 
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def orch_begin_task(run_id: str, poc_id: str, step_json: str) -> str:
     """Open a task + run step for one coder call. Returns {"task_id"}."""
     from poc_shared_tools import metadata as md
@@ -138,7 +138,7 @@ def orch_begin_task(run_id: str, poc_id: str, step_json: str) -> str:
     return json.dumps({"task_id": task["task_id"]})
 
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def orch_end_task(run_id: str, task_id: str, step: str, status: str, artifact_key: str = "",
                   produces: str = "", usage_json: str = "") -> str:
     """Close a task + run step; record the produced artifact key into runs.outputs. Returns {"ok"}."""
@@ -152,7 +152,7 @@ def orch_end_task(run_id: str, task_id: str, step: str, status: str, artifact_ke
     return json.dumps({"ok": True})
 
 
-@app.tool(is_local=False, timeout=600)
+@app.tool(timeout=600)
 def orch_assemble(run_id: str) -> str:
     """Download the whole code version, guardrail-scan it, bundle it, write + validate poc.manifest.json.
     Returns {"bundle_key", "contract_key", "manifest_key", "changed_components"} or {"error": {...}}."""
@@ -194,7 +194,7 @@ def orch_assemble(run_id: str) -> str:
         return json.dumps({"error": {"code": getattr(e, "code", "ASSEMBLE_FAILED"), "message": str(e)[:500]}})
 
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def orch_finalize(run_id: str, ok: bool, error_json: str = "") -> str:
     """Success: set current code version + poc status code_ready + finish run succeeded. Failure: finish run failed."""
     from poc_shared_tools import metadata as md
@@ -215,7 +215,7 @@ def orch_finalize(run_id: str, ok: bool, error_json: str = "") -> str:
     return json.dumps({"run_id": run_id, "error": err})
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def orch_get_bundle(poc_id: str, code_version: str) -> str:
     """Return the bundle key + manifest for a code version, or {"error": ...}."""
     from poc_shared_tools import s3 as s3t

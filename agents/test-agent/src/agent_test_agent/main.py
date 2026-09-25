@@ -26,7 +26,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.graph.message import add_messages
-from magenta_sdklanggraph import App
+from agent_engine_sdk_langgraph import App
 
 from poc_contracts import Envelope, ContractError, new_id, validate
 from agent_test_agent.a2a import invoke_tool
@@ -47,7 +47,7 @@ logger.info("✅ App created")
 # Tools — all in the Tool Pod (cloud + platform DB access)
 # =============================================================================
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def test_start_run(envelope_json: str) -> str:
     """Validate a run_e2e envelope, create the runs document (stage 'test'), update poc status.
     Returns {"run_id", "poc_id", "deployment_run_id", "scope"} or {"error": {...}}."""
@@ -75,7 +75,7 @@ def test_start_run(envelope_json: str) -> str:
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}})
 
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def test_load_context(run_id: str) -> str:
     """Load deployment.json, poc.manifest.json, poc_spec.md front matter, api_contract.yaml;
     store compact context in runs.outputs.context. Returns context dict or {"error": {...}}."""
@@ -140,7 +140,7 @@ def test_load_context(run_id: str) -> str:
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}})
 
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def test_generate_plan(run_id: str) -> str:
     """Build test_plan.json from context, write to S3, store in runs.outputs.test_plan.
     Returns test_plan dict or {"error": {...}}."""
@@ -161,7 +161,7 @@ def test_generate_plan(run_id: str) -> str:
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}})
 
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def test_run_api_smoke(run_id: str) -> str:
     """Execute API smoke tests and p95 latency checks via HTTP inside the Tool Pod.
     Returns results list or {"error": {...}}."""
@@ -179,7 +179,7 @@ def test_run_api_smoke(run_id: str) -> str:
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}})
 
 
-@app.tool(is_local=False, timeout=900)
+@app.tool(timeout=900)
 def test_run_browser(run_id: str) -> str:
     """Run Playwright journeys on the POC's EC2 instance via SSM; parse results; upload artifacts.
     Returns browser results list or {"error": {...}}."""
@@ -198,7 +198,7 @@ def test_run_browser(run_id: str) -> str:
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}})
 
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def test_write_report(run_id: str) -> str:
     """Assemble and validate test_report.json, write to S3, finish the run.
     Returns result dict (design decision 4) or {"error": {...}}."""

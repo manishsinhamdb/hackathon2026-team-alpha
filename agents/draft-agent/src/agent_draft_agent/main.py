@@ -28,7 +28,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
-from magenta_sdklanggraph import App
+from agent_engine_sdk_langgraph import App
 
 from poc_contracts import ContractError, Envelope, new_id, validate
 from agent_draft_agent.a2a import invoke_tool
@@ -50,7 +50,7 @@ PENDING_KEY = "pocs/{poc_id}/spec/pending/clarifications.json"
 # Tools — LLM generation + S3 / platform-DB I/O run in the Tool Pod
 # =============================================================================
 
-@app.tool(is_local=False, timeout=120)
+@app.tool(timeout=120)
 def draft_load(envelope_json: str) -> str:
     """Load the transcript from S3 and any pending clarification rounds; fold in params.answers.
     Returns {"transcript", "prior_rounds", "round_no"} or {"error": {...}} (INVALID_TRANSCRIPT)."""
@@ -80,7 +80,7 @@ def draft_load(envelope_json: str) -> str:
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:400]}})
 
 
-@app.tool(is_local=False, timeout=300)
+@app.tool(timeout=300)
 def draft_analyze(envelope_json: str, transcript: str, prior_rounds_json: str) -> str:
     """Completeness analysis (LLM, JSON only). Returns {"extraction", "missing", "usage"} or {"error"}."""
     from agent_draft_agent import pipeline
@@ -94,7 +94,7 @@ def draft_analyze(envelope_json: str, transcript: str, prior_rounds_json: str) -
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:400]}})
 
 
-@app.tool(is_local=False, timeout=300)
+@app.tool(timeout=300)
 def draft_questions(envelope_json: str, extraction_json: str, missing_json: str, round_no: int,
                     prior_rounds_json: str) -> str:
     """Generate <=5 clarifying questions, persist them to the pending clarifications file.
@@ -123,7 +123,7 @@ def draft_questions(envelope_json: str, extraction_json: str, missing_json: str,
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:400]}})
 
 
-@app.tool(is_local=False, timeout=300)
+@app.tool(timeout=300)
 def draft_generate(envelope_json: str, extraction_json: str, prior_rounds_json: str) -> str:
     """Allocate the next spec version, generate + validate the three artifacts, write all four spec files.
     Returns {"spec_version", "spec_key", "keys", "assumptions", "user_story_count", "poc_definitions", "usage"}
@@ -167,7 +167,7 @@ def draft_generate(envelope_json: str, extraction_json: str, prior_rounds_json: 
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:400]}})
 
 
-@app.tool(is_local=False, timeout=120)
+@app.tool(timeout=120)
 def draft_finalize(envelope_json: str, spec_version: str, spec_key: str, poc_definitions_json: str) -> str:
     """Side effects (§6.2 step 5): set current spec version + status spec_ready; RAG-index the spec into
     spec_embeddings (best-effort); tombstone the pending clarifications file. Returns {"ok", "indexed"}."""

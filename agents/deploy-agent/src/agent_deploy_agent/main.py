@@ -28,7 +28,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
-from magenta_sdklanggraph import App
+from agent_engine_sdk_langgraph import App
 
 from poc_contracts import Envelope, ContractError, new_id, validate
 from agent_deploy_agent import pipeline
@@ -52,7 +52,7 @@ TEST_WAIT_S = 20 * 60
 # Tools — all in the Tool Pod (cloud + platform DB access)
 # =============================================================================
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def deploy_start_run(envelope_json: str) -> str:
     """Validate a start_deploy_run / teardown request envelope, check the deploy gate and create the run document.
     Returns {"run_id", "poc_id"} or {"error": {...}}."""
@@ -79,7 +79,7 @@ def deploy_start_run(envelope_json: str) -> str:
         return json.dumps({"error": {"code": e.code, "message": str(e)[:500], "retryable": e.retryable}})
 
 
-@app.tool(is_local=False, timeout=1800)
+@app.tool(timeout=1800)
 def deploy_execute_step(run_id: str, step: str) -> str:
     """Execute one pipeline step for a deploy run and persist its outputs into runs.outputs.
     Returns {"ok", "step", "outputs", "error"}."""
@@ -102,14 +102,14 @@ def deploy_execute_step(run_id: str, step: str) -> str:
     return json.dumps({"ok": r["ok"], "step": step, "outputs": r["outputs"], "error": r["error"]}, default=str)
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def deploy_get_run(run_id: str) -> str:
     """Return the runs document for a run_id (status, steps, outputs, error, repair_attempts)."""
     from poc_shared_tools import metadata as md
     return json.dumps(md.get_run(run_id), default=str)
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def deploy_find_test_run(deployment_run_id: str) -> str:
     """Find the most recent test run that was started for a given deployment_run_id, or {"error": ...}.
     Used to recover after an A2A call to the Test Agent times out or fails transiently."""
@@ -128,7 +128,7 @@ def deploy_find_test_run(deployment_run_id: str) -> str:
         return json.dumps({"error": {"code": "DB_ERROR", "message": str(e)[:500]}})
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def deploy_get_deployment(poc_id: str) -> str:
     """Return the latest deployment.json for a POC, or {"error": ...}."""
     from poc_shared_tools import metadata as md, s3 as s3t
@@ -139,7 +139,7 @@ def deploy_get_deployment(poc_id: str) -> str:
     return s3t.get_text(key)
 
 
-@app.tool(is_local=False, timeout=900)
+@app.tool(timeout=900)
 def deploy_teardown(poc_id: str, run_id: str) -> str:
     """Tear down every cloud resource of a POC (instance, access-list entry, DB/user or flex cluster, secret)."""
     from poc_shared_tools import metadata as md
@@ -155,7 +155,7 @@ def deploy_teardown(poc_id: str, run_id: str) -> str:
         return json.dumps({"error": {"code": "TEARDOWN_FAILED", "message": str(e)[:1000]}})
 
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def deploy_build_failure_report(run_id: str, step: str, error_json: str) -> str:
     """Classify a step failure into a FailureReport (§8.9), bump the component's repair attempt, and store it under repairs/."""
     from poc_shared_tools import metadata as md, s3 as s3t
@@ -172,7 +172,7 @@ def deploy_build_failure_report(run_id: str, step: str, error_json: str) -> str:
     return json.dumps({"exhausted": False, "failure_report": fr, "failure_key": key, "task_id": task_id})
 
 
-@app.tool(is_local=False, timeout=60)
+@app.tool(timeout=60)
 def deploy_record_repair_result(run_id: str, new_code_version: str) -> str:
     """After a repair run succeeds, point the deploy run at the new code version and refresh bundle keys."""
     from poc_shared_tools import metadata as md, s3 as s3t
@@ -445,7 +445,7 @@ def build_agent() -> CompiledStateGraph:
 
 # Two small persistence tools the graph uses (declared after the graph for readability; registration is by decorator).
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def deploy_set_outputs(run_id: str, outputs_json: str) -> str:
     """Merge a JSON object into runs.outputs for a run."""
     from poc_shared_tools import metadata as md
@@ -454,7 +454,7 @@ def deploy_set_outputs(run_id: str, outputs_json: str) -> str:
     return json.dumps({"ok": True})
 
 
-@app.tool(is_local=False, timeout=30)
+@app.tool(timeout=30)
 def deploy_finish_run(run_id: str, status: str, error_json: str = "", outputs_json: str = "") -> str:
     """Finish a run with status succeeded|failed, optional error and outputs (JSON strings).
 

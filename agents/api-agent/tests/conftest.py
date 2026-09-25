@@ -1,4 +1,4 @@
-"""A minimal stand-in for magenta_sdklanggraph so the graph can be exercised without the platform.
+"""A minimal stand-in for agent_engine_sdk_langgraph so the graph can be exercised without the platform.
 Tools decorated with @app.tool are collected; app.get_tools() returns LangChain-compatible tools whose
 .invoke(kwargs) calls the function; a2a_tools() returns two fake tools driven by the test."""
 import sys, types, json
@@ -52,6 +52,6 @@ class FakeApp:
         pass
 
 
-mod = types.ModuleType("magenta_sdklanggraph")
+mod = types.ModuleType("agent_engine_sdk_langgraph")
 mod.App = FakeApp
-sys.modules["magenta_sdklanggraph"] = mod
+sys.modules["agent_engine_sdk_langgraph"] = mod

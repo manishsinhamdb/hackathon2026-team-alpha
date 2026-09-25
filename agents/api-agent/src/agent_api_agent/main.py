@@ -24,7 +24,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
-from magenta_sdklanggraph import App
+from agent_engine_sdk_langgraph import App
 
 from poc_contracts import ContractError, Envelope, new_id, validate
 from agent_api_agent.a2a import invoke_tool
@@ -45,7 +45,7 @@ KNOWN_TOOLS = {"generate_api"}
 # Tools — the LLM generation + S3 I/O run in the Tool Pod
 # =============================================================================
 
-@app.tool(is_local=False, timeout=300)
+@app.tool(timeout=300)
 def api_execute(envelope_json: str) -> str:
     """Validate a generate_api envelope, load inputs from S3, generate the contract (mode 'contract') or the
     backend (mode 'code'/'repair'), guardrail-scan and upload. Returns a result dict or {"error": {...}}."""
