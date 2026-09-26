@@ -139,3 +139,23 @@ html, body {
   animation: shimmer 1.4s infinite;
 }
 @keyframes shimmer { 100% { transform: translateX(100%); } }
+
+/*
+  Resizable Conversation | Pipeline split (Round 4, item 1). Below lg the panes stack, so the chat pane is
+  full width and the handle is hidden. At lg+ the chat pane's width is driven by --ct-chat-w (a percentage
+  set before first paint by SPLIT_INIT_SCRIPT and updated live while dragging), clamped by min/max-width so
+  neither pane drops below 380px. The pipeline pane simply takes the remaining space (flex: 1).
+*/
+.ct-split-chat { width: 100%; }
+@media (min-width: 1024px) {
+  .ct-split-chat {
+    flex: none;
+    width: var(--ct-chat-w, 41.6667%);
+    min-width: 380px;
+    max-width: calc(100vw - 380px);
+  }
+}
+.ct-split-handle {
+  touch-action: none; /* let pointer drag work on touch without the browser scrolling/zooming */
+  cursor: col-resize;
+}

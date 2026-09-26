@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
+import { SPLIT_INIT_SCRIPT } from "@/lib/split";
 
 export const metadata: Metadata = {
   title: "POC Builder — Control Tower",
@@ -22,6 +23,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <head>
         {/* Apply the persisted/OS theme before paint to avoid a flash. Mirrors src/lib/theme.ts. */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+        {/* Apply the persisted split width before paint (no layout flash). Mirrors src/lib/split.ts. */}
+        <script dangerouslySetInnerHTML={{ __html: SPLIT_INIT_SCRIPT }} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link
