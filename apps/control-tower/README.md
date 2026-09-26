@@ -23,7 +23,9 @@ browser  ──HTTP──►  Next.js server (BFF)  ──►  platform invoke A
   then invokes the chat workspace. Uses the **streaming** endpoint (`/invokeStream`) so a long turn (e.g. a
   rich spec summary that exceeds the ~60 s synchronous gateway cap) still returns the real reply; falls back
   to the synchronous `/invoke` if streaming errors, and surfaces a 504 / timeout gracefully as "still
-  replying, poll".
+  replying, poll". The UI session id is sent as the **`X-Session-Id` header** (this — not the body
+  `session_id` — is what threads a multi-turn conversation on the platform), so every turn of a conversation
+  shares one chat-agent thread.
 - `GET /api/pocs` — POCs (id, title, status, versions, created_at, updated_at, ui_archived).
 - `GET /api/pocs/:id` — the aggregated read model the board polls: poc doc + runs + tasks + active
   cloud_resources + latest deployment (app/api/health URLs, EC2 id, TTL) + test summary + clarification +
@@ -37,12 +39,17 @@ browser  ──HTTP──►  Next.js server (BFF)  ──►  platform invoke A
 
 The client is **two screens** (the approved v2 dark design in `design/`):
 
-- **Workspace (`/`)** — a top bar (POC selector, New POC, POC library, health chip), a **Conversation**
-  pane (client-side sessions, history recovered from `conversations`, action chips, composer) and a
-  **Pipeline** pane (horizontal Draft → Spec approved → Code → Code approved → Deploy → Tests → Torn down
-  stepper, Code run coder rows, Cloud resources / Deployment / Versions stack, Run history, clarification
-  card). The board polls `GET /api/pocs/:id` every 10 s (pausing when the tab is hidden) and refreshes
-  immediately after a chat turn.
+- **Workspace (`/`)** — a top bar (POC selector, New POC, POC library, health chip, **theme toggle**), a
+  **Conversation** pane (client-side sessions, history recovered from `conversations`, action chips,
+  composer) and a **Pipeline** pane (horizontal Draft → Spec approved → Code → Code approved → Deploy →
+  Tests → Torn down stepper, Code run coder rows, Cloud resources / Deployment / Versions stack, Run history,
+  clarification card). The board polls `GET /api/pocs/:id` on an **adaptive cadence** (15 s while a run is
+  live, 2 min when idle) with a **visible countdown ring** + Refresh-now button; it pauses when the tab is
+  hidden and refreshes immediately after a chat turn. A finished stage flashes its stepper node (and a live
+  deploy pops an App-link toast). If a turn creates a POC and none is selected, the workspace **auto-follows**
+  it.
+- **Themes** — light + dark, via a `data-theme` attribute on `<html>` and CSS-variable tokens. Default from
+  `prefers-color-scheme`, user choice persisted in `localStorage`, applied before first paint (no flash).
 - **Library (`/library`)** — search + filter chips (Active / Deployed / Torn down / Archived, with counts),
   a table sorted by created desc with **Open** and **Archive / Restore**, and a Sessions + Today sidebar.
 
@@ -100,12 +107,14 @@ npm test
 ```
 
 Covers the **token cache** (caching within TTL, refresh, TTL floor, credential-safe error, 401 retry,
-504→pending, SSE parsing); the **aggregation** (stepper mapping, gates, clarification, deployment URLs, test
-summary, coder-row mapping, run-history display status, `summarizeToday`, and the library
+504→pending, SSE parsing); **session threading** (the same `X-Session-Id` is sent on turn 1 and turn 2, on
+both the streaming and sync paths); the **aggregation** (stepper mapping, gates, clarification, deployment
+URLs, test summary, coder-row mapping, run-history display status, `summarizeToday`, and the library
 filters/counts/sort); the **stepper state mapping** (done / running / gate / not-started / failed) via
-`StageStep` render tests; and the **archive write** (`setArchived` against a fake collection, asserting it
-only ever touches `ui_archived` / `ui_archived_at`). Fake fetch/clock and fixture documents — no network or
-DB required. `npm test` → 49 tests.
+`StageStep` render tests; the **archive write** (`setArchived` against a fake collection, asserting it only
+ever touches `ui_archived` / `ui_archived_at`); the **theme** resolver + toggle (attribute + persistence) and
+rendering under both themes; and the **live helpers** (poc-id auto-follow detection, adaptive poll cadence).
+Fake fetch/clock and fixture documents — no network or DB required. `npm test` → 62 tests.
 
 ## Point it at another project / workspace
 

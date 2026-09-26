@@ -19,7 +19,7 @@ Two screens, both laptop-first (1440-wide reference), built to the approved v2 d
 - **Top bar.** Product mark *POC Builder / CONTROL TOWER*; a **POC selector** button showing the title,
   `spec vNNN`, a status pill and `created <d Mon · HH:MM>` (click to pick another POC — archived POCs are
   hidden here); **New POC** (green), **POC library**, a health chip `<project> · healthy` (green when the
-  last poll succeeded, red on error), and the signed-in user avatar.
+  last poll succeeded, red on error), a **light/dark theme toggle** (sun/moon), and the signed-in user avatar.
 - **Left — Conversation.** The session id, `Sessions (n)` (opens the library) and `New session` links.
   Messages are bubbles — user green (`#00684A`, right-aligned), agent card (`#112733`) with markdown and
   per-message timestamps; **run ids in an agent reply are surfaced mono with a copy button** (a structured
@@ -68,15 +68,31 @@ collection on load; the session store never touches the server.
 
 ## The UI (structure & design)
 
-The visual layer is the approved **v2 dark design** (`apps/control-tower/design/`): the Leafygreen accent
-`#00ED64` on near-black ink `#001E2B`, `#112733` cards, a `#06232F` pipeline column, and a fixed state
-palette — running blue (`#0498EC` / `#C3E7FE` on `#0C3B5B`), questions amber (`#FFDD49` on `#3B2A0B`),
-failed (`#FF9F97` on `#3D1512`), success mint (`#71F6BA` on `#023430`). Fonts are **Sora** (headings),
-**IBM Plex Sans** (body) and **IBM Plex Mono** (ids), loaded from Google Fonts via a `<link>` (no build-time
-font fetch; falls back to system fonts if blocked). Built with **Tailwind** (literal hex tokens in
-`tailwind.config.ts`), **lucide-react** icons and **react-markdown + remark-gfm**. **Light theme is not part
-of this round — the app is dark-only** (`prefers-color-scheme` handling was dropped as it no longer earns
-its keep). Layout is laptop-first; the workspace is chat (5/12) · pipeline (7/12), stacked below `lg`.
+The visual layer is the approved **v2 design** (`apps/control-tower/design/`), available in **dark and
+light**. Fonts are **Sora** (headings), **IBM Plex Sans** (body) and **IBM Plex Mono** (ids), loaded from
+Google Fonts via a `<link>` (no build-time font fetch; falls back to system fonts if blocked). Built with
+**Tailwind**, **lucide-react** icons and **react-markdown + remark-gfm**. Layout is laptop-first; the
+workspace is chat (5/12) · pipeline (7/12), stacked below `lg`.
+
+**Theming (light + dark).** Every colour is a **CSS variable** holding space-separated RGB channels (e.g.
+`--green: 0 237 100`), and every Tailwind token is `rgb(var(--x) / <alpha-value>)` so opacity modifiers
+(`bg-green/10`, `border-fail/40`) keep working. The active palette is chosen by a **`data-theme`** attribute
+on `<html>`; **no component holds a literal hex** — switching themes only flips the variables
+(`tailwind.config.ts` + the two palettes in `globals.css`).
+
+- **Dark** = the v2 palette: Leafygreen accent `#00ED64` on near-black ink `#001E2B`, `#112733` cards,
+  a `#06232F` pipeline column, running blue `#0498EC`/`#C3E7FE` on `#0C3B5B`, questions `#FFDD49` on
+  `#3B2A0B`, failed `#FF9F97` on `#3D1512`, success mint `#71F6BA` on `#023430`.
+- **Light** = the MongoDB house palette: surfaces `#FFFFFF`/`#F9FBFA`, ink text `#001E2B`, borders
+  `#E8EDEB`/`#C1C7C6`, green `#00ED64` (on-green `#001E2B`), running `#016BF8` on `#E1F7FF`, questions
+  `#944F01` on `#FEF7DB`, failed `#DB3030` on `#FFEAE5`, success `#00684A` on `#E3FCF7`.
+
+The default follows `prefers-color-scheme`; a user's choice is persisted in `localStorage` (`ct.theme`).
+An inline script in `<head>` applies the resolved theme **before first paint** so there is no flash (the
+`<html>` element carries `suppressHydrationWarning` because that script mutates it before hydration). A
+sun/moon **toggle** (aria-labelled) sits in both top bars. The palette/toggle logic lives in
+`src/lib/theme.ts` and `src/components/ThemeToggle.tsx`; `src/test/theme.test.tsx` covers the resolver, the
+toggle (attribute + persistence) and rendering under both themes.
 
 Components (`src/components/`):
 
@@ -105,16 +121,29 @@ Components (`src/components/`):
 
 ## The polling design
 
-The board polls `GET /api/pocs/:id` every **10 s**. Key properties:
+The board polls `GET /api/pocs/:id` on an **adaptive cadence** and shows a **visible countdown** to the next
+poll. Key properties:
 
-- **Visible, no full-page refresh.** The board is a client component; each tick fetches the aggregated JSON
-  and re-renders in place. A small indicator shows the cadence and the last poll time.
-- **Pauses when the tab is hidden** (`visibilitychange`) and resumes (with an immediate fetch) when it
+- **Visible, no full-page refresh.** The board is a client component; each poll fetches the aggregated JSON
+  and re-renders in place. A **circular SVG ring** in the header fills as the next poll approaches, with the
+  text `next check in M:SS`; on a successful poll it briefly flashes `updated`. A **Refresh now** button next
+  to the ring polls immediately.
+- **Adaptive interval that never stops while active.** Poll every **15 s** while *any* run for the selected
+  POC is live (draft/code/deploy/tests/teardown), and every **2 min** when the POC is idle. The cadence is
+  re-decided from each poll's data (`pollIntervalMs` in `src/lib/live.ts`), so it speeds up the moment a
+  stage starts and slows down once everything is terminal — but it never stops while a run is active.
+- **Pauses when the tab is hidden** (`visibilitychange`) and resumes with an **immediate** fetch when it
   becomes visible again — no wasted DB reads in a background tab.
 - **Immediate refresh after a chat turn.** When a chat turn returns, the chat pane bumps a signal that makes
   the board fetch right away, so a stage that just started shows up without waiting for the next tick.
-- **A 1 s local ticker** advances the elapsed time of a running run and the TTL countdown between polls, so
-  the board feels live without polling faster.
+- **Terminal-transition cues.** Comparing each poll's stepper cells to the previous one, a stage that just
+  reached a terminal state (**succeeded/failed**) **flashes** its stepper node, and a freshly **succeeded
+  deploy** surfaces the live **App link in a toast**.
+- **Auto-follow a new POC.** If an agent reply names a `poc_…` and nothing is selected, the workspace selects
+  it (so the board starts following it) and shows a `Following poc_… — <title>` toast. Manual selection
+  always wins — an already-selected POC is never overridden.
+- **A 1 s local ticker** advances the elapsed time of a running run and the TTL countdown between polls (and
+  drives the countdown ring + fires the due poll), so the board feels live without polling faster.
 - **Separation of concerns:** progress is read from the **DB**, never by asking the agent. This is the whole
   point — the platform's stage runs (draft/code/deploy/test/teardown) each register a `runs` document and
   update it as they go, so the UI reflects real state even while a stage runs in its own root session. The
@@ -139,6 +168,19 @@ origin; the server holds every secret and makes the privileged calls:
   cached until ~60 s before expiry, force-refreshed once on a 401. The browser is oblivious to all of it.
 - **The DB connection is read-only and pooled** in the server (one cached `MongoClient`), not opened per
   request and never from the browser.
+
+### Session handling (multi-turn continuity)
+
+A UI conversation must reach the chat agent under **one stable session** so its checkpointer keeps the
+thread across turns (otherwise it replies "I don't have an active POC in context"). The platform threads a
+session by the **`X-Session-Id` request header**, **not** the `session_id` body field (which it ignores for
+threading — it mints a fresh per-execution session each turn). So the BFF sends the UI's stable session id
+as **`X-Session-Id`** on every `/invokeStream` request (and on the sync `/invoke` fallback); the body still
+carries `session_id`/`user_id` for the documented shape, but the header is what threads. The UI session id
+*is* the platform session id — the stream returns only an `execution_id`, never a session id, so there is
+nothing to capture and remap. Proven live 2026-09-26: two consecutive turns on one header-session share the
+thread (turn 2 recalls turn 1); "How's it going?" after a draft turn reports the draft run's state.
+`src/test/tokenCache.test.ts` asserts the same `X-Session-Id` is sent on turn 1 and turn 2.
 
 ### Chat transport note (adapted from the documented platform behaviour)
 
@@ -186,8 +228,21 @@ at `/healthz`, expose `PORT`. Nothing else changes between local Docker and the 
     path — past the ~60 s cap, no 504;
   - **"How's it going?"** left the board consistent and updated via the 10 s poll with no page refresh.
 - **No code/deploy/teardown was run — no AWS/Atlas resources were created.**
-- **Unit tests:** 31 passing (token cache + SSE parsing; POC aggregation) with fake fetch/clock and fixture DB
-  documents.
+
+### Session/theme/polling verification (2026-09-26)
+
+- **Session bug fixed.** The platform threads a chat session on the **`X-Session-Id` header**, not the body
+  `session_id` (proven live: with the header, turn 2 recalls a token set in turn 1; without it, both the sync
+  and streaming paths forget). The `agentic invoke --session` CLI works because it sends the same header
+  (captured in its `-vv` debug). End-to-end through the BFF `/api/chat`, two turns on one UI session share the
+  thread; **"How's it going?"** for `poc_01M3DPW17ND98R1K9RXV2TYWNR` reports its **draft run**
+  (`run_01M3DPWZZPWCEVSZ593A04043F`, spec_ready v001).
+- **Both screens checked in a real browser in both themes** driving the medicine-finder POC (workspace +
+  library, dark + light). The adaptive poll indicator shows the countdown ring (2 min while idle) and
+  Refresh-now button. No code/deploy/teardown run — no AWS/Atlas resources.
+- **Unit tests:** 62 passing (token cache + SSE parsing + session-header threading; POC aggregation; stepper
+  mapping; archive write; theme resolver/toggle/both-theme render; live auto-follow + adaptive-cadence
+  helpers) with fake fetch/clock and fixture DB documents.
 
 ## Deploy on Kanopy (staging, namespace `sa-demo`)
 
