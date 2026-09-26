@@ -11,6 +11,10 @@ registry. Every agent must therefore agree on one canonical definition:
   2. main.py imports App from the canonical module.
   3. agent.yaml uses the migrated sandbox layout: a `sandboxes` block with the
      network policy inside each sandbox profile, and NO top-level `network:`.
+  4. Resilient runs (2026-09-26): every durable stage agent heartbeats its run
+     (draft, code, deploy + teardown), and the long stages (code orchestrator,
+     deploy) implement continue mode + self-handover. Chat never blocks on an
+     abandoned run and offers chat_retry_stage.
 
 Run from anywhere; paths resolve relative to the repo root. Requires PyYAML
 (the CI image already installs it for scripts/check_agents_map.py).
@@ -116,14 +120,15 @@ CHAT_FORBIDDEN_A2A_MARKERS = ("A2AClient", ".find_agent(", "invoke_a2a", "_a2a_r
 #   - coding-orchestrator -> coders: the seed coder reliably runs >60 s, so a *synchronous* invoke_envelope
 #     504s caller-side even though the coder succeeds. It must FIRE (platform_invoke.start_invoke) and POLL
 #     the coder's task document instead. It must NOT use invoke_envelope for coders.
-#   - deploy-agent -> test/repair: uses the synchronous platform_invoke.invoke_envelope, whose disconnect on
-#     the cap is tolerated by the deploy_find_test_run + poll fallback.
+#   - deploy-agent -> test/repair (and its own handover): FIRES too (start_invoke) and waits in one bounded
+#     tool call per window (deploy_wait_test_run / deploy_wait_code_run) — no synchronous invoke_envelope.
 # (Chat starts every stage — draft included — as a top-level invoke via _invoke_run; see
 # check_chat_stage_starts. No A2A cross-agent call remains anywhere.)
 GRAPH_PLATFORM_INVOKE_CALLERS = {
     "coding-orchestrator": {"require": ("platform_invoke.start_invoke(",),
                             "forbid": ("platform_invoke.invoke_envelope(",)},
-    "deploy-agent": {"require": ("platform_invoke.invoke_envelope(",), "forbid": ()},
+    "deploy-agent": {"require": ("platform_invoke.start_invoke(",),
+                     "forbid": ("platform_invoke.invoke_envelope(",)},
 }
 
 
@@ -170,7 +175,7 @@ def check_chat_stage_starts(errors: list[str]) -> None:
         k = text.find("\ndef ", i + 1)
         end = min(x for x in (j, k, len(text)) if x > 0)
         body = text[i:end]
-        if "_invoke_run(" not in body:
+        if "_invoke_run(" not in body and "_start_stage(" not in body:
             errors.append(f"chat-agent/main.py: {tool!r} must start the stage via _invoke_run (top-level "
                           "invoke), not an A2A child call — see docs/06 'Platform execution model'")
         if "_a2a_run(" in body:
@@ -190,6 +195,92 @@ def check_chat_stage_starts(errors: list[str]) -> None:
                               "must drive every stage via a top-level platform invoke (no A2A caller remains)")
 
 
+# Durable stage agents: each must keep runs.heartbeat_at fresh (<=30 s) while it works, or the run is read as
+# abandoned after 3 min. Markers are the shared helpers (md.heartbeat context manager / md.touch_run) plus,
+# where named, the tool bodies that must run inside a heartbeat.
+HEARTBEAT_AGENTS = {
+    "draft-agent": {"markers": ("md.heartbeat(",), "tools": ()},
+    "coding-orchestrator": {"markers": ("md.heartbeat(",), "tools": ("orch_wait_task", "orch_assemble")},
+    "deploy-agent": {"markers": ("md.heartbeat(",),
+                     "tools": ("deploy_execute_step", "deploy_teardown", "_wait_for_run")},
+}
+
+# Long stages must be resumable and hand themselves over before the platform's ~10 min execution kill:
+# a continue_run tool routed from mode "continue", a handover node that fires continue_run on its own skill,
+# and env-configurable thresholds.
+CONTINUE_AGENTS = {
+    "coding-orchestrator": {"skill": "code-orchestration", "env": ("ORCH_HANDOVER_AFTER_S", "ORCH_HANDOVER_TOOL_CALLS")},
+    "deploy-agent": {"skill": "deploy-operations", "env": ("DEPLOY_HANDOVER_AFTER_S", "DEPLOY_HANDOVER_TOOL_CALLS")},
+}
+
+
+def _tool_body(text: str, name: str) -> str | None:
+    i = text.find(f"def {name}(")
+    if i < 0:
+        return None
+    ends = [x for x in (text.find("\n@app.tool", i + 1), text.find("\ndef ", i + 1)) if x > 0]
+    return text[i:min(ends) if ends else len(text)]
+
+
+def check_resilient_runs(errors: list[str]) -> None:
+    for name, rules in HEARTBEAT_AGENTS.items():
+        rel = f"agents/{name}/main.py"
+        main_py = ROOT / "agents" / name / "src" / _module_dir(name) / "main.py"
+        if not main_py.is_file():
+            errors.append(f"{rel} is missing")
+            continue
+        text = main_py.read_text()
+        if not any(m in text for m in rules["markers"]):
+            errors.append(f"{rel} never heartbeats its run (md.heartbeat) — a durable stage must touch "
+                          "runs.heartbeat_at at least every 30 s (docs/08 §8)")
+        for tool in rules["tools"]:
+            body = _tool_body(text, tool)
+            if body is None:
+                errors.append(f"{rel}: {tool!r} not found (it must run inside md.heartbeat)")
+            elif "md.heartbeat(" not in body:
+                errors.append(f"{rel}: {tool!r} must run inside md.heartbeat(run_id) (it can outlast 3 min)")
+    draft = (ROOT / "agents/draft-agent/src/agent_draft_agent/main.py")
+    if draft.is_file():
+        dt = draft.read_text()
+        for tool in ("draft_load", "draft_analyze", "draft_questions", "draft_generate", "draft_finalize"):
+            body = _tool_body(dt, tool)
+            if body is None or "_alive(run_id)" not in body:
+                errors.append(f"agents/draft-agent/main.py: {tool!r} must heartbeat the draft run (with _alive(run_id))")
+
+    for name, rules in CONTINUE_AGENTS.items():
+        rel = f"agents/{name}/main.py"
+        main_py = ROOT / "agents" / name / "src" / _module_dir(name) / "main.py"
+        if not main_py.is_file():
+            continue
+        text = main_py.read_text()
+        checks = {
+            '"continue_run"': "handle tool continue_run (resume at the first step not done)",
+            'mode="continue"': "fire its handover with mode \"continue\"",
+            "md.reopen_run(": "reopen the run for a continue execution (md.reopen_run)",
+            "def over_budget(": "check the handover budget at step boundaries (over_budget)",
+            f'start_invoke("{rules["skill"]}"': f"hand over by firing a new root session of itself ({rules['skill']})",
+        }
+        for needle, why in checks.items():
+            if needle not in text:
+                errors.append(f"{rel} must {why} — missing {needle!r} (docs/08 §8 resumable long stages)")
+        for var in rules["env"]:
+            if var not in text:
+                errors.append(f"{rel}: handover threshold {var} must be env-configurable")
+
+    schema = ROOT / "packages/poc_contracts/poc_contracts/schemas/agent_envelope.json"
+    if schema.is_file() and '"continue"' not in schema.read_text():
+        errors.append("agent_envelope.json: request.mode must allow \"continue\"")
+
+    chat = ROOT / "agents/chat-agent/src/agent_chat_agent/main.py"
+    if chat.is_file():
+        ct = chat.read_text()
+        for needle, why in (("def chat_retry_stage(", "offer chat_retry_stage (the Retry chip)"),
+                            ("md.abandon_run(", "mark a stale run abandoned instead of blocking on it"),
+                            ("md.run_is_stale(", "detect stale runs by heartbeat")):
+            if needle not in ct:
+                errors.append(f"agents/chat-agent/main.py must {why} — missing {needle!r}")
+
+
 def main() -> int:
     try:
         import yaml  # noqa: F401
@@ -203,6 +294,7 @@ def main() -> int:
         check_agent(agent_dir, errors)
     check_chat_stage_starts(errors)
     check_graph_platform_invoke(errors)
+    check_resilient_runs(errors)
 
     if errors:
         print("Platform contract check failed:")
