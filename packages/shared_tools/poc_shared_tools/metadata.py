@@ -5,6 +5,8 @@ run per (poc_id, stage) via a partial unique index. Documents are validated
 against poc_contracts on create.
 """
 import logging
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
@@ -18,6 +20,13 @@ from .config import get_config
 from .errors import ToolError
 
 STAGES = ("draft", "code", "deploy", "test", "teardown")
+ACTIVE_STATUSES = ("queued", "running", "waiting_user")
+# Resilient runs (docs/06 "Resilient runs"): every durable stage touches runs.heartbeat_at at least every
+# HEARTBEAT_EVERY_S while it works; a run still `running` whose newest liveness stamp is older than
+# STALE_AFTER_S was abandoned (its execution was killed — e.g. the ~10-min per-execution cap) and may be
+# marked failed + continued by the chat agent.
+HEARTBEAT_EVERY_S = 30
+STALE_AFTER_S = 180
 GATE_FOR_STAGE = {"code": "spec_approved", "deploy": "code_approved"}
 
 _log = logging.getLogger(__name__)
@@ -135,7 +144,7 @@ def create_run(poc_id: str, stage: str, requested_by: str, started_by_agent: str
     t = now()
     doc = {"run_id": new_id("run"), "poc_id": poc_id, "stage": stage, "status": "queued", "requested_by": requested_by,
            "started_by_agent": started_by_agent, "steps": [], "inputs": inputs or {}, "outputs": {},
-           "repair_attempts": {}, "started_at": t, "created_at": t, "updated_at": t}
+           "repair_attempts": {}, "started_at": t, "heartbeat_at": t, "created_at": t, "updated_at": t}
     if trace_id: doc["trace_id"] = trace_id
     validate("run_document", doc)
     try:
@@ -156,8 +165,9 @@ def get_run(run_id: str) -> dict[str, Any]:
 
 def get_run_status(run_id: str) -> dict[str, Any]:
     r = get_run(run_id)
-    return {k: r.get(k) for k in ("run_id", "poc_id", "stage", "status", "current_step", "error", "repair_attempts", "outputs")} | \
-           {"steps": [{"name": s["name"], "status": s["status"]} for s in r.get("steps", [])]}
+    return {k: r.get(k) for k in ("run_id", "poc_id", "stage", "status", "current_step", "error", "repair_attempts", "outputs",
+                                   "heartbeat_at", "executions")} | \
+           {"steps": [{"name": s["name"], "status": s["status"]} for s in r.get("steps", [])], "stale": run_is_stale(r)}
 
 
 def set_run_status(run_id: str, status: str, **fields: Any) -> None:
@@ -176,9 +186,11 @@ def update_run_step(run_id: str, name: str, status: str, output_ref: str | None 
     if duration_ms is not None: step["duration_ms"] = duration_ms
     col = _db().runs
     r = col.update_one({"run_id": run_id, "steps.name": name},
-                       {"$set": {**{f"steps.$.{k}": v for k, v in step.items()}, "current_step": name, "status": "running", "updated_at": t}})
+                       {"$set": {**{f"steps.$.{k}": v for k, v in step.items()}, "current_step": name, "status": "running",
+                                 "updated_at": t, "heartbeat_at": t}})
     if r.matched_count == 0:
-        col.update_one({"run_id": run_id}, {"$push": {"steps": step}, "$set": {"current_step": name, "status": "running", "updated_at": t}})
+        col.update_one({"run_id": run_id}, {"$push": {"steps": step},
+                                            "$set": {"current_step": name, "status": "running", "updated_at": t, "heartbeat_at": t}})
 
 
 def bump_repair_attempt(run_id: str, component: str) -> int:
@@ -199,16 +211,125 @@ def finish_run(run_id: str, status: str, outputs: dict[str, Any] | None = None, 
     return _strip(r)
 
 
+# ---- liveness / continuation (docs/06 "Resilient runs") ------------------------
+
+def _parse_ts(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def touch_run(run_id: str) -> None:
+    """Stamp runs.heartbeat_at = now. Best-effort: a DB hiccup must never fail the stage doing the work."""
+    try:
+        _db().runs.update_one({"run_id": run_id}, {"$set": {"heartbeat_at": now()}})
+    except Exception as e:  # noqa: BLE001
+        _log.warning("touch_run(%s) failed: %s", run_id, e)
+
+
+@contextmanager
+def heartbeat(run_id: str | None, every_s: float = HEARTBEAT_EVERY_S):
+    """Touch the run on entry and every `every_s` on a daemon thread while a long tool call runs (a provisioning
+    wait, an LLM generation, a poll window) so the run never looks abandoned while it is actually working."""
+    if not run_id:
+        yield
+        return
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(every_s):
+            touch_run(run_id)
+
+    touch_run(run_id)
+    th = threading.Thread(target=beat, name=f"heartbeat-{run_id}", daemon=True)
+    th.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        touch_run(run_id)
+
+
+def last_alive_at(run: dict[str, Any]) -> datetime | None:
+    """Newest liveness stamp: heartbeat_at, else updated_at / started_at (runs created before heartbeats)."""
+    stamps = [d for d in (_parse_ts(run.get(k)) for k in ("heartbeat_at", "updated_at", "started_at")) if d]
+    return max(stamps) if stamps else None
+
+
+def run_is_stale(run: dict[str, Any], older_than_s: float = STALE_AFTER_S, at: datetime | None = None) -> bool:
+    """True iff the run is still active but nothing has touched it for `older_than_s` — i.e. abandoned."""
+    if run.get("status") not in ("queued", "running"):
+        return False
+    alive = last_alive_at(run)
+    if alive is None:
+        return True
+    return ((at or datetime.now(timezone.utc)) - alive).total_seconds() > older_than_s
+
+
+def find_stale_runs(stage: str | None = None, older_than_s: float = STALE_AFTER_S,
+                    poc_id: str | None = None) -> list[dict[str, Any]]:
+    """Active (queued/running) runs of `stage` whose heartbeat is older than `older_than_s`."""
+    q: dict[str, Any] = {"status": {"$in": ["queued", "running"]}}
+    if stage: q["stage"] = stage
+    if poc_id: q["poc_id"] = poc_id
+    at = datetime.now(timezone.utc)
+    return [_strip(d) for d in _db().runs.find(q) if run_is_stale(d, older_than_s, at)]
+
+
+def abandon_run(run_id: str, reason: str = "abandoned: heartbeat stale") -> dict[str, Any]:
+    """Mark a stale run failed (frees the one_running_per_stage slot). Only flips a still-active run."""
+    t = now()
+    r = _db().runs.find_one_and_update(
+        {"run_id": run_id, "status": {"$in": ["queued", "running"]}},
+        {"$set": {"status": "failed", "ended_at": t, "updated_at": t, "abandoned_at": t,
+                  "error": {"code": "ABANDONED", "message": reason, "retryable": True}}},
+        return_document=ReturnDocument.AFTER)
+    return _strip(r) if r else get_run(run_id)
+
+
+def reopen_run(run_id: str, reason: str, execution: str | None = None) -> dict[str, Any]:
+    """Put a failed/abandoned (or still running) run back to `running` for a continue execution and record the
+    continuation. Raises RUN_ALREADY_ACTIVE if another run of the same stage now holds the slot."""
+    t = now()
+    entry = {"at": t, "reason": reason}
+    if execution: entry["execution"] = execution
+    try:
+        r = _db().runs.find_one_and_update(
+            {"run_id": run_id, "status": {"$in": ["queued", "running", "failed"]}},
+            {"$set": {"status": "running", "updated_at": t, "heartbeat_at": t},
+             "$unset": {"ended_at": "", "error": ""},
+             "$push": {"continuations": entry}, "$inc": {"executions": 1}},
+            return_document=ReturnDocument.AFTER)
+    except DuplicateKeyError:
+        raise ToolError("RUN_ALREADY_ACTIVE", f"another run of this stage is active; cannot reopen {run_id}")
+    if not r:
+        raise ToolError("RUN_NOT_RESUMABLE", f"run {run_id} is missing, succeeded or cancelled")
+    return _strip(r)
+
+
+def record_continuation(run_id: str, reason: str, execution: str | None = None) -> None:
+    """A live execution hands itself over to a fresh root session (self-continuation); count it."""
+    t = now()
+    entry = {"at": t, "reason": reason}
+    if execution: entry["execution"] = execution
+    _db().runs.update_one({"run_id": run_id}, {"$push": {"continuations": entry}, "$inc": {"executions": 1},
+                                               "$set": {"heartbeat_at": t, "updated_at": t}})
+
+
 # ---- tasks ------------------------------------------------------------------
 
 def create_task(run_id: str, poc_id: str, agent: str, tool: str, mode: str | None = None,
-                input_ref: str | None = None, task_id: str | None = None) -> dict[str, Any]:
+                input_ref: str | None = None, task_id: str | None = None, component: str | None = None) -> dict[str, Any]:
     t = now()
     seq = _db().tasks.count_documents({"run_id": run_id}) + 1
     doc = {"task_id": task_id or new_id("task"), "run_id": run_id, "poc_id": poc_id, "seq": seq, "agent": agent, "tool": tool,
            "status": "running", "started_at": t, "created_at": t, "updated_at": t}
     if mode: doc["mode"] = mode
     if input_ref: doc["input_ref"] = input_ref
+    if component: doc["component"] = component  # stable task key (contract|seed|backend|frontend|assemble)
     validate("task_document", doc)
     _db().tasks.insert_one(dict(doc))
     return doc
@@ -222,8 +343,10 @@ def get_task(task_id: str) -> dict[str, Any]:
 
 
 def finish_task(task_id: str, status: str, output_ref: str | None = None, duration_ms: int | None = None,
-                token_usage: dict[str, int] | None = None, error: dict[str, Any] | None = None) -> None:
+                token_usage: dict[str, int] | None = None, error: dict[str, Any] | None = None,
+                component: str | None = None) -> None:
     upd: dict[str, Any] = {"status": status, "ended_at": now(), "updated_at": now()}
+    if component: upd["component"] = component
     if output_ref: upd["output_ref"] = output_ref
     if duration_ms is not None: upd["duration_ms"] = duration_ms
     if token_usage: upd["token_usage"] = token_usage
@@ -238,8 +361,20 @@ def list_tasks(run_id: str) -> list[dict[str, Any]]:
     return [_strip(d) for d in _db().tasks.find({"run_id": run_id}).sort("seq", ASCENDING)]
 
 
+def task_component(task: dict[str, Any]) -> str | None:
+    """Stable task key. New tasks carry `component`; legacy ones are derived from agent/mode (the api-agent's
+    contract-mode and code-mode tasks share an agent+tool, so mode decides: contract vs backend)."""
+    if task.get("component"):
+        return task["component"]
+    agent, mode = task.get("agent") or "", task.get("mode") or ""
+    if agent == "api_agent":
+        return "contract" if mode == "contract" else "backend"
+    return {"data_seeding_agent": "seed", "frontend_agent": "frontend"}.get(agent)
+
+
 def mark_coder_task(task_id: str | None, status: str, output_ref: str | None = None,
-                    token_usage: dict[str, int] | None = None, error: dict[str, Any] | None = None) -> None:
+                    token_usage: dict[str, int] | None = None, error: dict[str, Any] | None = None,
+                    component: str | None = None) -> None:
     """Best-effort: a coder marks ITS OWN task done/failed from its root session so the orchestrator — which
     the ~60s synchronous-invoke gateway cap disconnects while the coder runs on — can poll the outcome. A DB
     hiccup here must NOT fail the coder (it already produced its artifact); the orchestrator's poll ceiling
@@ -247,7 +382,7 @@ def mark_coder_task(task_id: str | None, status: str, output_ref: str | None = N
     if not task_id:
         return
     try:
-        finish_task(task_id, status, output_ref=output_ref, token_usage=token_usage, error=error)
+        finish_task(task_id, status, output_ref=output_ref, token_usage=token_usage, error=error, component=component)
     except Exception as e:  # noqa: BLE001 — best-effort, never surface a marking failure to the coder
         _log.warning("mark_coder_task(%s, %s) failed: %s", task_id, status, e)
 

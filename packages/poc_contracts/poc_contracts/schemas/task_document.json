@@ -91,6 +91,10 @@
     "updated_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "component": {
+      "type": "string",
+      "description": "Stable task key within the run: contract|seed|backend|frontend|assemble"
     }
   }
 }

@@ -47,7 +47,8 @@
             "generate",
             "contract",
             "code",
-            "repair"
+            "repair",
+            "continue"
           ]
         },
         "params": {
