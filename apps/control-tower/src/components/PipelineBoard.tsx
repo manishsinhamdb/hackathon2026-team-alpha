@@ -1,31 +1,76 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { HelpCircle } from "lucide-react";
-import type { PocDetail } from "@/lib/types";
+import { HelpCircle, RefreshCw } from "lucide-react";
+import type { PocDetail, StageCell } from "@/lib/types";
 import { fmtCountdown, fmtDuration } from "@/lib/format";
+import { pollIntervalMs, IDLE_POLL_MS } from "@/lib/live";
 import { useToast } from "./Toasts";
 import { Stepper } from "./Stepper";
 import CodeRun from "./CodeRun";
 import RunHistory from "./RunHistory";
 import { Card, CardTitle, CopyId, Skeleton, VersionChip } from "./ui";
 
+const UPDATED_FLASH_MS = 1_400;
+const STAGE_FLASH_MS = 2_000;
+
+function isTerminal(status: StageCell["status"]): boolean {
+  return status === "succeeded" || status === "failed";
+}
+
 export default function PipelineBoard({
   pocId,
   refreshSignal,
-  pollMs,
 }: {
   pocId: string;
   refreshSignal: number;
-  pollMs: number;
 }) {
   const [detail, setDetail] = useState<PocDetail | null>(null);
   const [error, setError] = useState("");
-  const [lastPoll, setLastPoll] = useState<number>(0);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [intervalMs, setIntervalMs] = useState<number>(IDLE_POLL_MS);
+  const [justUpdated, setJustUpdated] = useState(false);
+  const [flashKeys, setFlashKeys] = useState<Set<string>>(new Set());
+
   const pocRef = useRef(pocId);
   pocRef.current = pocId;
+  const nextPollAtRef = useRef<number>(0);
+  const intervalRef = useRef<number>(IDLE_POLL_MS);
+  const prevStagesRef = useRef<Record<string, StageCell["status"]>>({});
+  const updatedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toast = useToast();
+
+  // Compare the freshly-fetched stages to the previous poll: any stage that just reached a terminal state
+  // flashes its node, and a freshly-succeeded deploy surfaces the App link in a toast.
+  const detectTransitions = useCallback(
+    (data: PocDetail) => {
+      const prev = prevStagesRef.current;
+      const flashed: string[] = [];
+      for (const s of data.stages) {
+        const before = prev[s.key];
+        if (before !== undefined && !isTerminal(before) && isTerminal(s.status)) {
+          flashed.push(s.key);
+          if (s.key === "deploy" && s.status === "succeeded" && data.deployment?.app) {
+            toast.show({
+              message: `Deploy finished${data.poc.title ? ` — ${data.poc.title}` : ""}. The app is live.`,
+              tone: "success",
+              href: data.deployment.app,
+              linkLabel: "Open the app",
+              ttlMs: 12_000,
+            });
+          }
+        }
+      }
+      prevStagesRef.current = Object.fromEntries(data.stages.map((s) => [s.key, s.status]));
+      if (flashed.length) {
+        setFlashKeys(new Set(flashed));
+        if (flashTimer.current) clearTimeout(flashTimer.current);
+        flashTimer.current = setTimeout(() => setFlashKeys(new Set()), STAGE_FLASH_MS);
+      }
+    },
+    [toast],
+  );
 
   const load = useCallback(async () => {
     const id = pocRef.current;
@@ -38,20 +83,35 @@ export default function PipelineBoard({
       const data = await res.json();
       if (pocRef.current !== id) return; // selection changed mid-flight
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      setDetail(data as PocDetail);
+      const detailData = data as PocDetail;
+      detectTransitions(detailData);
+      setDetail(detailData);
       setError("");
-      setLastPoll(Date.now());
+      // Adapt the cadence from the fresh data and schedule the next poll.
+      const next = pollIntervalMs(detailData);
+      intervalRef.current = next;
+      setIntervalMs(next);
+      nextPollAtRef.current = Date.now() + next;
+      setJustUpdated(true);
+      if (updatedTimer.current) clearTimeout(updatedTimer.current);
+      updatedTimer.current = setTimeout(() => setJustUpdated(false), UPDATED_FLASH_MS);
     } catch (err) {
       if (pocRef.current !== id) return;
       const msg = err instanceof Error ? err.message : String(err);
       setError(msg);
+      // Back off to the idle cadence on error but keep trying.
+      intervalRef.current = IDLE_POLL_MS;
+      nextPollAtRef.current = Date.now() + IDLE_POLL_MS;
       toast.error(`Pipeline update failed: ${msg}`);
     }
-  }, [toast]);
+  }, [toast, detectTransitions]);
 
+  // Reset per-POC state and fetch immediately when the selection changes.
   useEffect(() => {
     setDetail(null);
     setError("");
+    prevStagesRef.current = {};
+    setFlashKeys(new Set());
     load();
   }, [pocId, load]);
 
@@ -59,26 +119,25 @@ export default function PipelineBoard({
     if (refreshSignal > 0) load();
   }, [refreshSignal, load]);
 
-  // 10 s poll, paused while the tab is hidden.
+  // 1 s ticker: advances running-run elapsed + TTL countdowns, drives the poll-countdown ring, AND fires
+  // the next poll when it is due (self-scheduling adaptive interval; paused while the tab is hidden).
   useEffect(() => {
-    const timer = setInterval(() => {
-      if (!document.hidden) load();
-    }, pollMs);
+    const t = setInterval(() => {
+      setNowMs(Date.now());
+      if (!document.hidden && nextPollAtRef.current && Date.now() >= nextPollAtRef.current) {
+        nextPollAtRef.current = Date.now() + intervalRef.current; // guard against overlapping fires
+        load();
+      }
+    }, 1000);
     const onVis = () => {
-      if (!document.hidden) load();
+      if (!document.hidden) load(); // poll immediately on return
     };
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      clearInterval(timer);
+      clearInterval(t);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [load, pollMs]);
-
-  // 1 s ticker so running-run elapsed and the TTL countdown advance between polls.
-  useEffect(() => {
-    const t = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, []);
+  }, [load]);
 
   if (!pocId) {
     return (
@@ -93,8 +152,8 @@ export default function PipelineBoard({
 
   const { poc, stages, coders, runHistory, clarification, deployment, test, cloudResources } = detail;
   const codeRun = detail.runs.find((r) => r.stage === "code");
-  const refreshedAgo = lastPoll ? Math.max(0, Math.round((nowMs - lastPoll) / 1000)) : null;
   const active = cloudResources.activeCount;
+  const remainingMs = nextPollAtRef.current ? Math.max(0, nextPollAtRef.current - nowMs) : intervalMs;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -103,17 +162,20 @@ export default function PipelineBoard({
         <div className="font-sora text-sm font-semibold">Pipeline</div>
         <CopyId value={poc.poc_id} className="text-xs" />
         <span className="flex-1" />
-        <span className="flex items-center gap-1.5 text-xs text-faint">
-          <span className={`h-2 w-2 rounded-full ${error ? "bg-fail" : "bg-green"}`} />
-          {error ? "reconnecting" : refreshedAgo === null ? "live" : `live · refreshed ${refreshedAgo}s ago`}
-        </span>
+        <PollIndicator
+          error={!!error}
+          justUpdated={justUpdated}
+          remainingMs={remainingMs}
+          intervalMs={intervalMs}
+          onRefresh={load}
+        />
       </div>
 
       {/* Body */}
       <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-12 content-start gap-4 overflow-y-auto p-6">
         {/* Stepper */}
         <Card className="col-span-12 p-5">
-          <Stepper stages={stages} nowMs={nowMs} teardownHint={`${active} active`} />
+          <Stepper stages={stages} nowMs={nowMs} teardownHint={`${active} active`} flashKeys={flashKeys} />
         </Card>
 
         {/* Clarification (draft finished with questions) */}
@@ -234,6 +296,62 @@ export default function PipelineBoard({
           </Card>
         )}
       </div>
+    </div>
+  );
+}
+
+// The auto-poll indicator: a circular SVG countdown that fills as the next poll approaches, the cadence
+// text ("next check in 0:12" / "updated"), and a manual "Refresh now" button.
+function PollIndicator({
+  error,
+  justUpdated,
+  remainingMs,
+  intervalMs,
+  onRefresh,
+}: {
+  error: boolean;
+  justUpdated: boolean;
+  remainingMs: number;
+  intervalMs: number;
+  onRefresh: () => void;
+}) {
+  const R = 8;
+  const C = 2 * Math.PI * R;
+  const elapsed = Math.min(1, Math.max(0, (intervalMs - remainingMs) / intervalMs));
+  const secs = Math.ceil(remainingMs / 1000);
+  const mm = Math.floor(secs / 60);
+  const ss = String(secs % 60).padStart(2, "0");
+  const label = error ? "reconnecting" : justUpdated ? "updated" : `next check in ${mm}:${ss}`;
+  const ring = error ? "text-fail" : justUpdated ? "text-success" : "text-run";
+
+  return (
+    <div className="flex items-center gap-2.5 text-xs">
+      <span className="relative inline-flex h-5 w-5 items-center justify-center" aria-hidden>
+        <svg width="20" height="20" viewBox="0 0 20 20" className="-rotate-90">
+          <circle cx="10" cy="10" r={R} fill="none" strokeWidth="2.5" className="stroke-line2" />
+          <circle
+            cx="10"
+            cy="10"
+            r={R}
+            fill="none"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            className={`${ring} stroke-current transition-[stroke-dashoffset] duration-1000 ease-linear`}
+            strokeDasharray={C}
+            strokeDashoffset={error ? C : justUpdated ? 0 : C * (1 - elapsed)}
+          />
+        </svg>
+      </span>
+      <span className={`tabular-nums ${justUpdated ? "text-success" : "text-faint"}`}>{label}</span>
+      <button
+        onClick={onRefresh}
+        aria-label="Refresh now"
+        title="Refresh now"
+        className="flex h-7 items-center gap-1.5 rounded-full border border-line2 px-2.5 text-faint transition-colors hover:border-green hover:text-green"
+      >
+        <RefreshCw className="h-3 w-3" />
+        Refresh now
+      </button>
     </div>
   );
 }

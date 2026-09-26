@@ -29,11 +29,13 @@ export function StageStep({
   nowMs,
   isLast,
   teardownHint,
+  flash,
 }: {
   stage: StageCell;
   nowMs: number;
   isLast: boolean;
   teardownHint?: string;
+  flash?: boolean;
 }) {
   const s = stage;
   const isGate = s.kind === "gate";
@@ -42,19 +44,22 @@ export function StageStep({
   const failed = s.status === "failed";
   const notStarted = s.status === "not_started" || s.status === "cancelled";
 
+  // A node that just reached a terminal state flashes briefly (feature 4).
+  const flashCls = flash ? "animate-flash" : "";
+
   // Circle
   let circle: React.ReactNode;
   if (done) {
     circle = (
-      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-green">
+      <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-green ${flashCls}`}>
         <Check className="h-3.5 w-3.5 text-greenInk" strokeWidth={3} />
       </span>
     );
   } else if (running) {
-    circle = <span className="h-7 w-7 shrink-0 rounded-full border-[3px] border-runText bg-run box-border" />;
+    circle = <span className={`h-7 w-7 shrink-0 rounded-full border-[3px] border-runText bg-run box-border ${flashCls}`} />;
   } else if (failed) {
     circle = (
-      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-fail">
+      <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-fail ${flashCls}`}>
         <X className="h-3.5 w-3.5 text-failBg" strokeWidth={3} />
       </span>
     );
@@ -106,11 +111,28 @@ export function StageStep({
   );
 }
 
-export function Stepper({ stages, nowMs, teardownHint }: { stages: StageCell[]; nowMs: number; teardownHint?: string }) {
+export function Stepper({
+  stages,
+  nowMs,
+  teardownHint,
+  flashKeys,
+}: {
+  stages: StageCell[];
+  nowMs: number;
+  teardownHint?: string;
+  flashKeys?: Set<string>;
+}) {
   return (
     <div className="flex items-start">
       {stages.map((s, i) => (
-        <StageStep key={s.key} stage={s} nowMs={nowMs} isLast={i === stages.length - 1} teardownHint={teardownHint} />
+        <StageStep
+          key={s.key}
+          stage={s}
+          nowMs={nowMs}
+          isLast={i === stages.length - 1}
+          teardownHint={teardownHint}
+          flash={flashKeys?.has(s.key)}
+        />
       ))}
     </div>
   );
