@@ -227,6 +227,101 @@ closed control shows the selected POC's title, spec, status and timestamp. `filt
 `fmtSelectorTime` in `src/lib/selector.ts` are unit-tested (the month is a fixed 3-letter table so the format
 is stable across ICU versions).
 
+## Round 5 — abandoned runs, artefacts, nicknames, transition notices
+
+UI/BFF only (no agent, `agent.yaml`, secret or AWS-resource changes). The UI's DB writes are still limited
+to two UI-only field pairs: `pocs.ui_archived`/`ui_archived_at` (existing) and the new
+`pocs.ui_label`/`ui_label_at`. Pure logic lives in tested libs; components stay thin.
+
+### Coder rows and abandoned runs (`src/lib/aggregate.ts`, `src/lib/runHealth.ts`)
+
+**Coder rows** match a task by **`tasks.component` first**. Older tasks lack the field, so the legacy
+fallback applies: mode `contract` → contract; `api_agent` with mode `code`/`repair` → backend;
+`data_seeding_agent` → seed; `frontend_agent` → frontend; tool `assemble*` → assemble. When several tasks
+match a row (for example a repaired backend re-fire), the **newest by `seq` wins**.
+
+**Abandoned rule.** A run is *abandoned* when either:
+
+- it is `queued`/`running` and the newest of (`heartbeat_at`, `updated_at`, `started_at`) is **older than
+  180 s**; or
+- it is `failed` with `error.code === "ABANDONED"` (the chat agent gave up on it).
+
+A run with no timestamps is never abandoned. Why: a platform execution can die (for example pod eviction
+or a gateway cap) without the run document leaving `running`, so the stepper used to spin forever.
+Abandoned shows **amber** in the stepper cell (`abandoned · Xm stale`), the run-history pill, the Code run
+header and the Pipeline header.
+
+Each of these places has a **Retry / Continue** button. The label is *Continue* when the run has any done
+task or step. The button sends exactly
+`Retry the ${stage} stage for ${poc_id} (continue run ${run_id} if it can be resumed).`
+through the normal chat send path, so busy handling applies. `runs.executions` > 1 shows subtly as
+`exec N`, and hand-overs (`runs.continuations`) are carried on the run view.
+
+### Artefacts card (`src/lib/artifacts.ts`, `src/lib/s3.ts`)
+
+- `GET /api/pocs/:id/artifacts` lists `pocs/{id}/` grouped by stage (spec, code, deploy, test, input), newest
+  version or run first. Generated sources, step logs and screenshots are hidden.
+- `GET /api/pocs/:id/artifacts/open?key=…` returns a **presigned GetObject valid for ≤ 5 min**
+  (`{url, expires_in}`, or a 302 with `&redirect=1`, `Cache-Control: no-store`).
+  - The key must start with `pocs/{id}/` and must not be the prefix itself.
+  - It must contain no `..`, `\`, `//` or control characters, and the id must look like `poc_…`.
+  - An invalid key gets a 400; no S3 access gets a 503.
+- It uses `@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner`, **server-only**. The browser only ever
+  receives one short-lived URL.
+- **Env:** `POC_S3_BUCKET` (default `msinha-hackathon`), `AWS_REGION` (default `ap-south-1`), and
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` (plus `AWS_SESSION_TOKEN` if temporary).
+- **Without credentials** (the current state), the list is derived from the DB with `s3: false`:
+  - the transcript;
+  - `current_versions` → the canonical spec and code file names;
+  - `runs.outputs.*_key`, `keys.*` and `component_keys.*`;
+  - the deployment key.
+
+  In this mode, *open* is disabled with the tooltip "S3 access not configured on the server".
+- In staging, the bucket and region are set in `environments/staging.yaml`. The two key entries are there
+  but commented out: add them to `control-tower-secrets` first, then uncomment them.
+
+### Names (`src/lib/label.ts`, `LabelEdit.tsx`)
+
+- **POC nickname** (`POST /api/pocs/:id/label {label}`):
+  - The label is trimmed, whitespace is collapsed, and it is capped at ≤ 80 chars.
+  - A non-empty label sets `ui_label` and `ui_label_at`. An empty label **`$unset`s both**.
+  - Validation errors return 400; an unknown POC returns 404.
+- The nickname is editable inline (pencil icon; Enter or blur saves, Escape cancels) in the top-bar closed
+  control, the selector rows and the library table.
+- Wherever the title shows, the nickname replaces it, with the agent title beneath (small, muted). Selector
+  and library search also match the nickname.
+- **Session name** is the Conversation headline, editable inline (stored in `localStorage` via the sessions
+  store).
+
+### Transition notices (`src/lib/transitions.ts`, `SystemNotice.tsx`)
+
+On each board poll, `detectTransitions(prev, next)` compares the previous and current detail of the
+**same** POC. It fires on these transitions:
+
+| Transition | Card and actions |
+|---|---|
+| draft succeeded | *spec ready* (Show me the spec / Build it), or *clarification needed* (focus the composer) |
+| code succeeded | *code ready* (Deploy · 4h TTL) |
+| deploy succeeded | *deployed*, or *deployed & tested* (Open App / Tear it down) |
+| standalone test run | *tested* |
+| teardown | *torn down* (Summary) |
+| any failure | *failed* (Retry) |
+| abandoned | *abandoned* (Retry / Continue) |
+
+Rules:
+
+- **Baseline first.** No notice fires on the first poll after load or after a POC switch (`prev = null`).
+- **Deploy folds the tests.** The deploy agent runs e2e tests inside the deploy run. A test run failing
+  while a deploy is active posts no separate notice; the deploy's outcome carries the test line.
+- **Dedupe.** Notices are deduped per `(poc_id, run_id, transition)` in a persisted seen-set
+  (`localStorage` `ct.notices.seen.v1`, newest 300). An abandoned notice's id also includes the
+  execution number, so a resumed run that dies again notifies again.
+- **Cards.** Each notice posts a full-width tinted system card into the conversation. Its send-buttons
+  disable while a turn is in flight.
+- **Auto check-in.** One **"How's it going?"** is sent per poll batch that produced fresh notices, and only
+  if the session is free (nothing in flight or queued). If the session is busy, it is **skipped, never
+  queued**. An auto-send that still hits a 409 is dropped with a one-line system note.
+
 ## Why the BFF holds the credentials
 
 The Next.js **server routes are a Backend-For-Frontend**. The browser talks only to `/api/*` on the same
@@ -320,7 +415,10 @@ at `/healthz`, expose `PORT`. Nothing else changes between local Docker and the 
   helpers) with fake fetch/clock and fixture DB documents. **Round 4 added 55:** split clamp/pointer/key/
   persist; combobox filter/sort/format; chat classify + 409→queue→auto-send + error mapping; runtime-session
   list/stop + 409 busy; session-status derivation; session→POC resolution; new-POC-during-turn + auto-follow
-  precedence.
+  precedence. **Round 5 added 51 (168 total):** abandoned rule + retry message/label; component-first and
+  legacy coder-row matching (newest seq wins); nickname write (fake collection) + search; artefacts key
+  guard/grouping/DB fallback/presign (fake S3 store); transition detection + dedupe + auto-check-in rule;
+  abandoned stepper cell.
 
 ### Round 4 verification (2026-09-26)
 

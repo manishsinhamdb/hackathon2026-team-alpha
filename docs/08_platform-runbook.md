@@ -201,6 +201,30 @@ Record a table per agent: destination → sandbox → allowed (Y/N) → proven b
        polls with "how's it going?"; `draft_finish_run` closes it succeeded (spec or clarification questions
        in `outputs`) / failed. Proven in the cloud: DailyDabba draft finalized as a root session in ~5 m 47 s.
 
+6. **Long stages must be resumable, hand themselves over, and heartbeat** (docs/06 "Resilient runs
+   (2026-09-26)"). A platform execution is killed at **~10 min wall clock** (seen twice on the orchestrator,
+   once on deploy) and a killed execution leaves its run document `running` forever. So:
+   - **Heartbeat.** Every durable stage (draft, code, deploy, teardown) keeps `runs.heartbeat_at` fresh at
+     least every 30 s while it works — wrap any tool that can take > 30 s in `metadata.heartbeat(run_id)`
+     (a daemon thread; touches on entry, every 30 s, on exit). `update_run_step` also touches it.
+   - **Stale = abandoned.** A `queued`/`running` run whose newest of `heartbeat_at`/`updated_at`/`started_at`
+     is > 3 min old is abandoned (`metadata.run_is_stale` / `find_stale_runs`). Nothing may block on it:
+     chat marks it `failed` (`abandon_run`: `error.code ABANDONED`, retryable) and continues or restarts.
+   - **Resumable.** A long stage implements `continue_run(run_id)` (`mode: "continue"`): `reopen_run` the
+     run (records `continuations[]`, `$inc executions`), then re-enter at the **first step not done**,
+     re-attaching to an in-flight callee instead of re-firing it, reusing every artefact already in S3.
+     It must be idempotent (continue on a succeeded run is a no-op). Each task carries a stable
+     `tasks.component` key so the resume point is unambiguous.
+   - **Self-handover.** At a step boundary, if the execution is > 6 min old or has made > 25 tool calls
+     (`ORCH_/DEPLOY_HANDOVER_AFTER_S`, `ORCH_/DEPLOY_HANDOVER_TOOL_CALLS`; defaults 360 / 25), persist state
+     and FIRE `continue_run` on your own skill as a new root session (`platform_invoke.start_invoke`), then
+     reply `started`. Before a known-long step (deploy: `launch_instance`, `provision_db`, ~4 min headroom)
+     hand over early rather than risk the kill mid-step.
+   - **One bounded call per wait.** Never poll with one tool step per poll (it burns the recursion limit and
+     the tool-call budget): a single tool polls internally for ≤ 4 min (heartbeating) and returns terminal
+     or `running`; the graph loops or hands over.
+   `scripts/check_platform_contract.py` asserts all of the above per agent.
+
 ---
 
 ## 9. Driving multi-turn tests
