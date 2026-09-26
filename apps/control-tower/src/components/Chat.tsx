@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Paperclip, Send } from "lucide-react";
 import type { ConversationMessage } from "@/lib/types";
+import { pocIdIn } from "@/lib/live";
 import { useToast } from "./Toasts";
 import MessageBubble, { ReplyingPill } from "./MessageBubble";
 
@@ -30,12 +31,14 @@ export default function Chat({
   pocId,
   onSent,
   onNewSession,
+  onPocDetected,
 }: {
   sessionId: string;
   sessionCount: number;
   pocId: string;
   onSent: () => void;
   onNewSession: () => void;
+  onPocDetected?: (pocId: string) => void;
 }) {
   const [messages, setMessages] = useState<LiveMessage[]>([]);
   const [recovered, setRecovered] = useState<ConversationMessage[]>([]);
@@ -98,6 +101,9 @@ export default function Chat({
           toast.error(`Chat failed: ${err}`);
         } else {
           setMessages((m) => [...m, { role: "assistant", content: data.reply, at: Date.now() }]);
+          // If the reply names a POC (e.g. a just-drafted one), let the workspace auto-follow it.
+          const detected = pocIdIn(String(data.reply ?? ""));
+          if (detected) onPocDetected?.(detected);
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -108,7 +114,7 @@ export default function Chat({
         onSent(); // nudge the board to refresh right away + bump the session turn count
       }
     },
-    [sessionId, busy, onSent, toast],
+    [sessionId, busy, onSent, toast, onPocDetected],
   );
 
   // Canned actions operate on the SELECTED POC. The chat agent resolves the POC from natural language, so

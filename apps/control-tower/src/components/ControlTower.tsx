@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PocSummary } from "@/lib/types";
 import { useSessions } from "@/lib/sessions";
 import Chat from "./Chat";
 import PipelineBoard from "./PipelineBoard";
 import TopBar from "./TopBar";
-import { ToastProvider } from "./Toasts";
+import { ToastProvider, useToast } from "./Toasts";
 
 const POLL_MS = 10_000;
 const PROJECT = "hackathon2026"; // the deploy-target platform project shown in the health chip
@@ -19,6 +19,10 @@ function ControlTowerInner() {
   // Bumped after a chat turn completes so the board fetches immediately instead of waiting for the next tick.
   const [refreshSignal, setRefreshSignal] = useState(0);
   const { sessions, activeId, newSession, recordTurn } = useSessions();
+  const toast = useToast();
+  const pocsRef = useRef<PocSummary[]>([]);
+  const selectedRef = useRef<string>("");
+  const followedRef = useRef<string>(""); // last poc we auto-followed, to avoid re-toasting
 
   // Honour ?poc=<id> (e.g. opened from the library) once on mount.
   useEffect(() => {
@@ -31,6 +35,7 @@ function ControlTowerInner() {
       const res = await fetch("/api/pocs", { cache: "no-store" });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      pocsRef.current = data.pocs as PocSummary[];
       setPocs(data.pocs as PocSummary[]);
       setListError("");
     } catch (err) {
@@ -58,15 +63,35 @@ function ControlTowerInner() {
 
   // The workspace selector hides archived POCs (the library's Archived filter shows them).
   const selectablePocs = useMemo(() => pocs.filter((p) => !p.ui_archived), [pocs]);
+  selectedRef.current = selected;
 
   const onNewPoc = () => {
     setSelected("");
+    followedRef.current = ""; // a fresh POC may be created next; allow auto-follow again
     newSession();
   };
   const onSent = useCallback(() => {
     setRefreshSignal((n) => n + 1);
     if (activeId) recordTurn(activeId);
-  }, [activeId, recordTurn]);
+    loadPocs(); // a turn may have created a POC — refresh the list so it appears + resolves its title
+  }, [activeId, recordTurn, loadPocs]);
+
+  // Auto-follow the POC a turn surfaces: if nothing is selected, select it and start the board on it.
+  // Manual selection always wins — we never override a POC the user already picked.
+  const onPocDetected = useCallback(
+    (pocId: string) => {
+      if (selectedRef.current || followedRef.current === pocId) return;
+      followedRef.current = pocId;
+      setSelected(pocId);
+      const title = pocsRef.current.find((p) => p.poc_id === pocId)?.title;
+      toast.show({
+        message: `Following ${pocId}${title ? ` — ${title}` : ""}`,
+        tone: "success",
+      });
+      loadPocs(); // pull the new POC in so the selector + board have its details
+    },
+    [toast, loadPocs],
+  );
 
   const connection: "ok" | "error" | "loading" = listError ? "error" : loaded ? "ok" : "loading";
 
@@ -90,10 +115,11 @@ function ControlTowerInner() {
             pocId={selected}
             onSent={onSent}
             onNewSession={newSession}
+            onPocDetected={onPocDetected}
           />
         </div>
         <div className="min-h-0 flex-1 bg-panel">
-          <PipelineBoard pocId={selected} refreshSignal={refreshSignal} pollMs={POLL_MS} />
+          <PipelineBoard pocId={selected} refreshSignal={refreshSignal} />
         </div>
       </div>
     </div>

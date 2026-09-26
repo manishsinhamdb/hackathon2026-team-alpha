@@ -1,21 +1,47 @@
 "use client";
 
-import { AlertTriangle, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import { createContext, useCallback, useContext, useMemo, useRef, useState } from "react";
+
+type Tone = "error" | "info" | "success";
 
 interface Toast {
   id: number;
   message: string;
+  tone: Tone;
+  href?: string;
+  linkLabel?: string;
+}
+
+export interface ToastInput {
+  message: string;
+  tone?: Tone;
+  href?: string; // optional external link (e.g. the deployed App URL)
+  linkLabel?: string;
+  ttlMs?: number;
 }
 
 interface ToastApi {
   error: (message: string) => void;
+  show: (input: ToastInput) => void;
 }
 
-const ToastContext = createContext<ToastApi>({ error: () => {} });
+const ToastContext = createContext<ToastApi>({ error: () => {}, show: () => {} });
 
 export function useToast(): ToastApi {
   return useContext(ToastContext);
+}
+
+const TONE_BORDER: Record<Tone, string> = {
+  error: "border-fail/40",
+  info: "border-line2",
+  success: "border-success/50",
+};
+
+function ToneIcon({ tone }: { tone: Tone }) {
+  if (tone === "error") return <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-fail" />;
+  if (tone === "success") return <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />;
+  return <Info className="mt-0.5 h-4 w-4 shrink-0 text-run" />;
 }
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
@@ -28,18 +54,31 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     setToasts((t) => t.filter((x) => x.id !== id));
   }, []);
 
+  const push = useCallback(
+    (input: ToastInput) => {
+      const now = Date.now();
+      if (lastRef.current.message === input.message && now - lastRef.current.at < 8000) return;
+      lastRef.current = { message: input.message, at: now };
+      const id = ++seq.current;
+      const toast: Toast = {
+        id,
+        message: input.message,
+        tone: input.tone ?? "info",
+        href: input.href,
+        linkLabel: input.linkLabel,
+      };
+      setToasts((t) => [...t.slice(-3), toast]);
+      setTimeout(() => dismiss(id), input.ttlMs ?? 6000);
+    },
+    [dismiss],
+  );
+
   const api = useMemo<ToastApi>(
     () => ({
-      error: (message: string) => {
-        const now = Date.now();
-        if (lastRef.current.message === message && now - lastRef.current.at < 8000) return;
-        lastRef.current = { message, at: now };
-        const id = ++seq.current;
-        setToasts((t) => [...t.slice(-3), { id, message }]);
-        setTimeout(() => dismiss(id), 6000);
-      },
+      error: (message: string) => push({ message, tone: "error" }),
+      show: (input: ToastInput) => push(input),
     }),
-    [dismiss],
+    [push],
   );
 
   return (
@@ -50,10 +89,22 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           <div
             key={t.id}
             role="alert"
-            className="pointer-events-auto flex animate-toast-in items-start gap-2.5 rounded-lg border border-fail/40 bg-surface px-3.5 py-3 shadow-2xl"
+            className={`pointer-events-auto flex animate-toast-in items-start gap-2.5 rounded-lg border bg-surface px-3.5 py-3 shadow-2xl ${TONE_BORDER[t.tone]}`}
           >
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-fail" />
-            <div className="min-w-0 flex-1 text-sm text-content">{t.message}</div>
+            <ToneIcon tone={t.tone} />
+            <div className="min-w-0 flex-1 text-sm text-content">
+              <div className="break-words">{t.message}</div>
+              {t.href && (
+                <a
+                  href={t.href}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1 inline-block font-semibold text-green underline underline-offset-2"
+                >
+                  {t.linkLabel ?? "Open"}
+                </a>
+              )}
+            </div>
             <button
               onClick={() => dismiss(t.id)}
               className="shrink-0 rounded p-0.5 text-faint transition-colors hover:text-content"
