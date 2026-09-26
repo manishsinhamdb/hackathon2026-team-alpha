@@ -153,3 +153,11 @@ def test_graph_invalid_envelope():
     out = graph.invoke({"messages": [HumanMessage(content="not json")]}, config={"configurable": {"thread_id": "t2"}})
     resp = validate("agent_envelope", json.loads(out["messages"][-1].content))["response"]
     assert resp["status"] == "failed" and resp["error"]["code"] == "INVALID_ENVELOPE"
+
+
+def test_parse_output_tolerates_trailing_prose_after_fenced_json():
+    """2026-09-26: the backend repair replied with fenced JSON followed by notes → "Extra data" and the whole
+    repair failed LLM_OUTPUT_INVALID. Only the first JSON object counts."""
+    text = '```json\n{"files": {"a.txt": "x"}}\n```\nREPAIR_NOTES: typed the pipeline as PipelineStage[].'
+    assert pipeline.parse_output(text)["files"] == {"a.txt": "x"}
+    assert pipeline.parse_output('Here you go: {"files": {}} and more')["files"] == {}
