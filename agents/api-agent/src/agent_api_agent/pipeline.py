@@ -16,12 +16,15 @@ import json
 import os
 import re
 import tempfile
+import time
 from typing import Any
 
 import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from poc_contracts import ContractError, schema_for, validate
+
+from .typecheck import known_fix_hints, typecheck_backend
 
 COMPONENT = "backend"
 
@@ -422,6 +425,18 @@ Hard rules:
 - Mongoose models map to the schema_design collections and declare the same indexes.
 - package.json pins versions and has scripts build "tsc -p tsconfig.json" and start "node dist/server.js"; installs
   run with `npm install --no-audit --no-fund` (no lockfile is shipped, so devDependencies like typescript are installed).
+- The code MUST compile with `tsc --noEmit -p tsconfig.json` under "strict": true — it is type-checked before it is
+  accepted. No implicit any, no untyped catch-variable property access, every import resolvable from package.json.
+- Atlas Search / Vector Search pipelines (any pipeline containing $search, $searchMeta or $vectorSearch): mongoose's
+  PipelineStage[] type does not describe these stages, so NEVER pass them to Model.aggregate() and never annotate them
+  PipelineStage[] or Record<string, unknown>[]. Type them with the official driver's Document type and run them on
+  the native collection:
+      import type { Document } from "mongodb";
+      const pipeline: Document[] = [{ $vectorSearch: { index: "vector_index", path: "embedding", queryVector, numCandidates: 100, limit: 10 } }, { $limit: 5 }];
+      const docs = await ProductModel.collection.aggregate(pipeline).toArray();
+  and add "mongodb": "^6.9.0" to package.json dependencies. Plain pipelines (no Atlas Search stage) may keep Model.aggregate().
+- The seed component creates the Atlas Search / Vector Search indexes; the backend never creates or drops indexes of
+  that kind. If a search stage fails (index missing or still building) fall back to an equivalent regex/find query.
 - Keep the file set small and readable.
 
 Return ONE JSON object and nothing else — no prose, no markdown fences — of shape:
@@ -468,6 +483,9 @@ def _backend_human(inputs: dict[str, Any], mode: str, failure: dict[str, Any] | 
                  "contract and schema:\n" + golden_backend_example())
     if mode == "repair" and failure is not None:
         parts.append("\n## THIS IS A REPAIR. FailureReport:\n" + json.dumps(failure, indent=2))
+        hints = known_fix_hints(json.dumps(failure))
+        if hints:
+            parts.append("\n## Known fix for this failure (apply it):\n- " + "\n- ".join(hints))
         if previous_source:
             parts.append("\n## Previous source (fix ONLY what the failure indicates; keep the api contract, manifest "
                          "entrypoints, env variable names unchanged):\n" + json.dumps({"files": previous_source}))
@@ -565,6 +583,36 @@ def validate_backend(files: dict[str, str]) -> list[str]:
             json.loads(files["package.json"])
         except json.JSONDecodeError as e:
             errors.append(f"package.json is not valid JSON: {e}")
+    errors.extend(lint_atlas_search_typing(files))
+    return errors
+
+
+_ATLAS_STAGE_RE = re.compile(r"\$(vectorSearch|searchMeta|search)\b")
+_DRIVER_DOCUMENT_IMPORT_RE = re.compile(r"import\s+(type\s+)?\{[^}]*\bDocument\b[^}]*\}\s+from\s+[\"']mongodb[\"']")
+
+
+def lint_atlas_search_typing(files: dict[str, str]) -> list[str]:
+    """The pipeline-typing rule, checked statically: a TS source that builds a $search/$searchMeta/$vectorSearch
+    stage must type its pipelines with the driver's Document (imported from "mongodb"), must not annotate them
+    PipelineStage[], and package.json must depend on mongodb. Catches the medicine-finder TS2769 even when the
+    compile gate cannot run."""
+    errors: list[str] = []
+    uses = [rel for rel, src in files.items() if rel.endswith(".ts") and _ATLAS_STAGE_RE.search(src)]
+    for rel in uses:
+        src = files[rel]
+        if not _DRIVER_DOCUMENT_IMPORT_RE.search(src):
+            errors.append(f'{rel} builds an Atlas Search stage but does not `import type {{ Document }} from "mongodb"` '
+                          "to type its pipelines as Document[]")
+        if "PipelineStage" in src:
+            errors.append(f"{rel} uses mongoose PipelineStage with an Atlas Search stage; type the pipeline Document[] "
+                          "and run it with Model.collection.aggregate(pipeline).toArray()")
+    if uses:
+        try:
+            deps = json.loads(files.get("package.json", "{}")).get("dependencies", {})
+        except json.JSONDecodeError:
+            deps = {}
+        if "mongodb" not in deps:
+            errors.append('package.json must list "mongodb" in dependencies (the Document type for Atlas Search pipelines)')
     return errors
 
 
@@ -573,32 +621,79 @@ def _usage(resp: Any) -> dict[str, int]:
     return {"input_tokens": int(m.get("input_tokens", 0)), "output_tokens": int(m.get("output_tokens", 0))}
 
 
+# The api_execute tool has 540 s; one backend LLM call takes ~150 s and the compile gate ~10-60 s, so no new LLM
+# attempt starts after GEN_BUDGET_S (worst case ≈ budget + one call + one type-check).
+GEN_BUDGET_S = int(os.environ.get("API_GEN_BUDGET_S", "300"))
+MAX_ATTEMPTS = 3
+
+
+def _rejection(errors: list[str], mode: str, typecheck_failed: bool) -> HumanMessage:
+    if mode == "contract":
+        return HumanMessage(content="Your previous output was rejected:\n- " + "\n- ".join(errors)
+                            + '\nReturn ONE corrected JSON object {"files": {"api_contract.yaml": "..."}} only.')
+    if typecheck_failed:
+        hints = known_fix_hints("\n".join(errors))
+        return HumanMessage(content=(
+            "Your backend does not compile. `tsc --noEmit -p tsconfig.json` reported:\n- " + "\n- ".join(errors)
+            + ("\n\n" + "\n".join(hints) if hints else "")
+            + '\nFix every error. Return ONE JSON object {"files": {...}} containing ONLY the files you change '
+              "(complete file contents; unchanged files may be omitted)."))
+    return HumanMessage(content="Your previous output was rejected:\n- " + "\n- ".join(errors)
+                        + '\nReturn ONE corrected JSON object {"files": {...}} only.')
+
+
 def generate(inputs: dict[str, Any], mode: str, failure: dict[str, Any] | None = None,
-             previous_source: dict[str, str] | None = None, llm: Any = None) -> tuple[dict[str, str], dict[str, int]]:
-    """Generate the contract (mode 'contract') or backend (mode 'code'/'repair'). Returns (files, usage)."""
+             previous_source: dict[str, str] | None = None, llm: Any = None,
+             typecheck: Any = None, report: dict[str, Any] | None = None,
+             budget_s: float | None = None) -> tuple[dict[str, str], dict[str, int]]:
+    """Generate the contract (mode 'contract') or backend (mode 'code'/'repair'). Returns (files, usage).
+
+    Backend output must pass the static checks AND the compile gate (`typecheck`, default typecheck_backend:
+    npm install + tsc --noEmit). A compile failure is fed back with any known-fix hint and the model returns only
+    the files it changes, merged onto the previous output. `report` (optional) receives {"typecheck": {...},
+    "attempts": n} so the caller can record what the gate saw."""
     if llm is None:
         from .llm import build_llm
         llm = build_llm(temperature=0)
-    validator = validate_contract if mode == "contract" else validate_backend
+    backend = mode != "contract"
+    validator = validate_contract if not backend else validate_backend
+    # API_TYPECHECK=0 disables the default gate (unit tests); an explicit `typecheck=` always runs.
+    default_check = typecheck_backend if os.environ.get("API_TYPECHECK", "1") != "0" else None
+    check = (typecheck or default_check) if backend else None
+    budget = GEN_BUDGET_S if budget_s is None else budget_s
+    t0 = time.time()
     messages = build_messages(inputs, mode, failure, previous_source)
     usage = {"input_tokens": 0, "output_tokens": 0}
     last_errors: list[str] = []
-    for _ in range(2):
+    current: dict[str, str] | None = None
+    rep = report if report is not None else {}
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        if attempt > 1 and time.time() - t0 > budget:
+            last_errors = last_errors + [f"generation budget ({budget:.0f}s) exhausted after {attempt - 1} attempt(s)"]
+            break
+        rep["attempts"] = attempt
         resp = llm.invoke(messages)
         u = _usage(resp)
         usage = {k: usage[k] + u[k] for k in usage}
         text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        tc_failed = False
         try:
             obj = parse_output(text)
-            errs = validator(obj["files"])
+            files = {**(current or {}), **obj["files"]} if backend else obj["files"]
+            errs = validator(files)
+            if backend:
+                current = files
+            if not errs and check is not None:
+                tc = check(files)
+                rep["typecheck"] = {k: tc.get(k) for k in ("status", "errors", "duration_s")}
+                if tc.get("status") == "failed":
+                    errs, tc_failed = list(tc.get("errors") or ["tsc failed"]), True
             if not errs:
-                return obj["files"], usage
+                return files, usage
             last_errors = errs
         except (ValueError, json.JSONDecodeError) as e:
             last_errors = [str(e)]
-        shape = ('{"files": {"api_contract.yaml": "..."}}' if mode == "contract" else '{"files": {...}}')
-        messages = messages + [HumanMessage(content="Your previous output was rejected:\n- "
-                                            + "\n- ".join(last_errors) + f"\nReturn ONE corrected JSON object {shape} only.")]
+        messages = messages + [_rejection(last_errors, mode, tc_failed)]
     raise LLMOutputInvalid(last_errors)
 
 

@@ -159,6 +159,99 @@ def golden_example() -> str:
     })
 
 
+# Atlas Search / Vector Search indexes (2026-09-26, medicine finder): a POC whose query patterns use $search /
+# $searchMeta / $vectorSearch needs those indexes, and nothing else creates them. The seed owns them because it
+# drops and re-inserts the collections (a drop also drops the collection's search indexes). The helper below is
+# given to the model verbatim; it is idempotent (creates only missing names, tolerates the post-drop
+# IndexAlreadyExists race) and waits until every index is queryable. Proven on the `pov` cluster (M30) with a
+# readWrite-scoped POC user: createSearchIndexes is allowed and both kinds turn queryable in ~25 s.
+SEARCH_INDEX_HELPER_JS = r"""// Atlas Search / Vector Search indexes — idempotent. Call AFTER the collections are re-inserted (a drop removes
+// a collection's search indexes). Creates each missing index by name, then waits until all are queryable.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function liveSearchIndex(db, collection, name) {
+  const found = await db.collection(collection).listSearchIndexes(name).toArray();
+  return found.find((ix) => ix.status !== "DELETING") || null;
+}
+async function ensureSearchIndexes(db, specs, timeoutMs = 240000) {
+  const t0 = Date.now();
+  for (const { collection, name, type, definition } of specs) {
+    while (!(await liveSearchIndex(db, collection, name))) {
+      try {
+        await db.collection(collection).createSearchIndexes([{ name, type, definition }]);
+      } catch (e) {
+        // 68 IndexAlreadyExists: the dropped collection's index is still being removed — retry until it is gone
+        if (e.code !== 68 || Date.now() - t0 > timeoutMs) throw e;
+        await sleep(5000);
+      }
+    }
+  }
+  for (;;) {
+    const pending = [];
+    for (const { collection, name } of specs) {
+      const ix = await liveSearchIndex(db, collection, name);
+      if (!ix || !ix.queryable) pending.push(`${collection}.${name}`);
+    }
+    if (!pending.length) return true;
+    if (Date.now() - t0 > timeoutMs) {
+      console.error(`warning: search indexes not queryable after ${timeoutMs} ms: ${pending.join(", ")}`);
+      return false;
+    }
+    await sleep(5000);
+  }
+}
+"""
+
+_SEARCH_STAGE_RE = re.compile(r"\$(vectorSearch|searchMeta|search)\b")
+_INDEX_NAME_RE = re.compile(r"""index\s*:\s*['"]([A-Za-z0-9_\-]+)['"]""")
+
+
+def search_index_requirements(query_patterns: dict[str, Any] | None) -> list[dict[str, str]]:
+    """The Atlas Search / Vector Search indexes the query patterns name: [{name, kind, collection}], kind
+    "vectorSearch" when the name is used by a $vectorSearch stage, else "search". A search pattern that names no
+    index needs the index called "default"."""
+    out: dict[str, dict[str, str]] = {}
+    for p in (query_patterns or {}).get("patterns", []) or []:
+        text = " ".join(str(p.get(k, "")) for k in ("pseudocode", "description", "aggregation_sketch"))
+        stages = set(_SEARCH_STAGE_RE.findall(text))
+        if not stages:
+            continue
+        collection = (p.get("collections") or [""])[0]
+        names = _INDEX_NAME_RE.findall(text) or ["default"]
+        for n in names:
+            # a name used next to $vectorSearch is a vector index; the search-only stages share a search index
+            vec = "vectorSearch" in stages and (stages == {"vectorSearch"} or re.search(
+                r"\$vectorSearch\s*:\s*\{[^}]*index\s*:\s*['\"]" + re.escape(n), text) is not None)
+            kind = "vectorSearch" if vec else "search"
+            cur = out.get(n)
+            if cur is None or (kind == "vectorSearch" and cur["kind"] != "vectorSearch"):
+                out[n] = {"name": n, "kind": kind, "collection": collection}
+    return sorted(out.values(), key=lambda r: r["name"])
+
+
+def validate_search_indexes(files: dict[str, str], required: list[dict[str, str]]) -> list[str]:
+    """The seed must create every required search index, idempotently, with the driver's createSearchIndexes."""
+    if not required:
+        return []
+    src = files.get("seed.js", "")
+    errors: list[str] = []
+    if "createSearchIndexes" not in src or "listSearchIndexes" not in src:
+        errors.append("seed.js must create the Atlas Search / Vector Search indexes with the ensureSearchIndexes helper "
+                      "(listSearchIndexes + createSearchIndexes) after re-inserting the collections")
+    for r in required:
+        if f'"{r["name"]}"' not in src and f"'{r['name']}'" not in src:
+            errors.append(f'seed.js does not create the {r["kind"]} index "{r["name"]}" on {r["collection"]}')
+    if any(r["kind"] == "vectorSearch" for r in required) and not re.search(r"""type\s*:\s*['"]vectorSearch['"]""", src):
+        errors.append('seed.js must create its vector index with type: "vectorSearch" (fields: vector + filter)')
+    try:
+        ver = json.loads(files.get("package.json", "{}")).get("dependencies", {}).get("mongodb", "")
+        major = int(re.sub(r"[^0-9.]", "", ver).split(".")[0] or 0)
+    except (json.JSONDecodeError, ValueError, AttributeError):
+        major = 0
+    if major and major < 6:
+        errors.append("package.json must pin mongodb >= 6 (createSearchIndexes)")
+    return errors
+
+
 SYSTEM = """You are the Data Seeding Agent of an automated POC builder. From a MongoDB schema design and query
 patterns you generate a Node.js 20 seed script that fills a MongoDB database with realistic, deterministic data.
 
@@ -169,6 +262,14 @@ Hard rules (every file must obey):
 - Deterministic: seed a PRNG (mulberry32) with schema_design.seed_requirements.deterministic_seed so every run
   produces identical data.
 - Idempotent: drop each collection, then insert. Create every index declared in schema_design (unique where declared).
+- Atlas Search / Vector Search: when the query patterns use $search, $searchMeta or $vectorSearch, the seed creates
+  every search index they name, AFTER the inserts, with the ensureSearchIndexes helper given in the request (copy it
+  verbatim; only write the specs). Search index: {collection, name, definition: {mappings: {dynamic: true, fields:
+  {<autocompleted field>: [{type: "string"}, {type: "autocomplete", tokenization: "edgeGram", minGrams: 2, maxGrams: 15,
+  foldDiacritics: true}]}}}}. Vector index: {collection, name, type: "vectorSearch", definition: {fields: [{type:
+  "vector", path, numDimensions: <the exact length of the vectors you generate>, similarity: "cosine"}, {type:
+  "filter", path: <each field used in that $vectorSearch filter>}...]}}. `await ensureSearchIndexes(db, SPECS)` before
+  printing the summary line; never drop or update a search index.
 - Respect SEED_MAX_DOCS as an upper bound and each collection's seed.count. Insert in batches for large volumes.
 - Realistic data honouring each collection's generator_hints (locale, value ranges, relationships between collections
   such as order line items referencing product SKUs, and co-occurrence clusters where the hints ask for them).
@@ -196,6 +297,12 @@ def _human_message(inputs: dict[str, Any], mode: str, failure: dict[str, Any] | 
     if inputs.get("query_patterns"):
         parts.append("\n## query_patterns.json (for realistic co-occurrence)\n"
                      + json.dumps(inputs["query_patterns"], indent=2))
+    required = search_index_requirements(inputs.get("query_patterns"))
+    if required:
+        parts.append("\n## Atlas Search / Vector Search indexes this seed MUST create (after the inserts)\n"
+                     + "\n".join(f'- "{r["name"]}" ({r["kind"]}) on collection {r["collection"]}' for r in required)
+                     + "\nInclude this helper in seed.js verbatim and call `await ensureSearchIndexes(db, SPECS)`:\n"
+                     + SEARCH_INDEX_HELPER_JS)
     parts.append("\n## Worked example — the golden `seed` component for a different POC (Kirana Basket). "
                  "Match its structure, determinism and single-JSON-summary-line convention; adapt collections, "
                  "fields, volumes and realism to THIS schema_design:\n" + golden_example())
@@ -241,9 +348,9 @@ def parse_output(text: str) -> dict[str, Any]:
     return obj
 
 
-def validate_files(files: dict[str, str]) -> list[str]:
+def validate_files(files: dict[str, str], required_indexes: list[dict[str, str]] | None = None) -> list[str]:
     """Return a list of human-readable problems (empty == valid)."""
-    errors: list[str] = []
+    errors: list[str] = validate_search_indexes(files, required_indexes or [])
     for f in REQUIRED_FILES:
         if f not in files:
             errors.append(f"missing required file {f}")
@@ -279,6 +386,7 @@ def generate(inputs: dict[str, Any], mode: str = "code", failure: dict[str, Any]
         from .llm import build_llm
         llm = build_llm(temperature=0)
     messages = build_messages(inputs, mode, failure, previous_source)
+    required = search_index_requirements(inputs.get("query_patterns"))
     usage = {"input_tokens": 0, "output_tokens": 0}
     last_errors: list[str] = []
     for attempt in range(2):
@@ -288,7 +396,7 @@ def generate(inputs: dict[str, Any], mode: str = "code", failure: dict[str, Any]
         text = resp.content if isinstance(resp.content, str) else str(resp.content)
         try:
             obj = parse_output(text)
-            errs = validate_files(obj["files"])
+            errs = validate_files(obj["files"], required)
             if not errs:
                 return obj["files"], usage
             last_errors = errs

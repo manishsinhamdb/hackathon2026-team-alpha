@@ -1,7 +1,7 @@
 """A minimal stand-in for agent_engine_sdk_langgraph so the graph can be exercised without the platform.
 Tools decorated with @app.tool are collected; app.get_tools() returns LangChain-compatible tools whose
 .invoke(kwargs) calls the function; a2a_tools() returns two fake tools driven by the test."""
-import sys, types, json
+import os, sys, types, json
 from typing import Any, Callable
 
 
@@ -55,3 +55,6 @@ class FakeApp:
 mod = types.ModuleType("agent_engine_sdk_langgraph")
 mod.App = FakeApp
 sys.modules["agent_engine_sdk_langgraph"] = mod
+
+# The backend compile gate (npm install + tsc) is exercised with injected fakes; never hit npm from unit tests.
+os.environ.setdefault("API_TYPECHECK", "0")

@@ -18,6 +18,8 @@ dependencies = [
     "pymongo>=4.6",
     "requests>=2.32",
     "pyyaml>=6.0",
+    # Node + npm for the backend compile gate (npm install + tsc --noEmit) inside the Tool Pod.
+    "nodejs-wheel-binaries>=22,<23",
     "poc-contracts",
     "poc-shared-tools",
     "poc-infra-tools",

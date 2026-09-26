@@ -45,7 +45,9 @@ KNOWN_TOOLS = {"generate_api"}
 # Tools — the LLM generation + S3 I/O run in the Tool Pod
 # =============================================================================
 
-@app.tool(timeout=300)
+# 540 s: backend generation + the npm/tsc compile gate + one fix-up turn (pipeline.GEN_BUDGET_S bounds the
+# attempts); still well inside the ~10-min execution wall clock of the api agent's own root session.
+@app.tool(timeout=540)
 def api_execute(envelope_json: str) -> str:
     """Validate a generate_api envelope, load inputs from S3, generate the contract (mode 'contract') or the
     backend (mode 'code'/'repair'), guardrail-scan and upload. Returns a result dict or {"error": {...}}."""
@@ -84,10 +86,15 @@ def api_execute(envelope_json: str) -> str:
                 }
                 failure = p.get("failure")
                 previous_source = _load_prev(s3t, p["previous_source_key"]) if (mode == "repair" and p.get("previous_source_key")) else None
-                files, usage = pipeline.generate(gen_inputs, mode, failure=failure, previous_source=previous_source)
+                report: dict[str, Any] = {}
+                files, usage = pipeline.generate(gen_inputs, mode, failure=failure, previous_source=previous_source,
+                                                 report=report)
+                logger.info("backend %s generated in %s attempt(s); typecheck=%s", mode, report.get("attempts"),
+                            (report.get("typecheck") or {}).get("status", "not-run"))
                 written = pipeline.write_component(poc_id, run_id, code_version, files, AGENT_NAME)
                 out = {"code_version": code_version, "component": pipeline.COMPONENT,
-                       "artifact_kind": "code", "artifact_key": written["prefix"], "usage": usage}
+                       "artifact_kind": "code", "artifact_key": written["prefix"], "usage": usage,
+                       "typecheck": (report.get("typecheck") or {}).get("status", "not-run")}
     except (ContractError, KeyError, ValueError) as e:
         out = {"error": {"code": "INVALID_ENVELOPE", "message": str(e)[:500]}}
     except pipeline.LLMOutputInvalid as e:
@@ -190,6 +197,8 @@ def build_agent() -> CompiledStateGraph:
             result["component"] = r["component"]
         if r.get("contract_key"):
             result["contract_key"] = r["contract_key"]
+        if r.get("typecheck"):
+            result["typecheck"] = r["typecheck"]
         return reply(state, Envelope.succeeded(req["task_id"], result, [art], usage=r.get("usage") or None))
 
     b = StateGraph(ApiAgentState)

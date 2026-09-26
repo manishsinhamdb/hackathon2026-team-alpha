@@ -131,9 +131,9 @@ def test_generate_backend_retries_then_succeeds():
     assert usage["input_tokens"] == 10
 
 
-def test_generate_backend_raises_after_two_bad():
+def test_generate_backend_raises_after_max_attempts():
     bad = json.dumps({"files": {"src/server.ts": "x"}})
-    llm = FakeLLM([bad, bad])
+    llm = FakeLLM([bad] * pipeline.MAX_ATTEMPTS)
     with pytest.raises(pipeline.LLMOutputInvalid):
         pipeline.generate({"contract_yaml": CONTRACT_YAML, "schema_design": SCHEMA}, "code", llm=llm)
 
