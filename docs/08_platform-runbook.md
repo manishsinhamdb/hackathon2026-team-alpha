@@ -225,6 +225,21 @@ Record a table per agent: destination → sandbox → allowed (Y/N) → proven b
      or `running`; the graph loops or hands over.
    `scripts/check_platform_contract.py` asserts all of the above per agent.
 
+### 8.7 Atlas Search / Vector Search POCs (proven 2026-09-26)
+
+Two things must be true, or the deploy's `build_backend` fails on EC2 or search silently falls back to regex:
+
+- **Typed pipelines.** mongoose `PipelineStage[]` (and `Model.aggregate()`) reject `$vectorSearch`/`$search`/
+  `$searchMeta` pipelines (TS2769). The generated backend must use `import type { Document } from "mongodb";
+  const pipeline: Document[] = [...]; await Model.collection.aggregate(pipeline).toArray()` with `mongodb` in
+  dependencies. The api-agent enforces this with a prompt rule, a lint, and its own `tsc --noEmit` gate, and its
+  repair prompt carries the known fix.
+- **The index step.** Search indexes are not created by the driver's normal `createIndexes`, and dropping a
+  collection drops them. The seed creates them after the inserts with the `ensureSearchIndexes` helper
+  (create-if-missing, code 68 tolerated, wait until queryable; about 30 s on M30). The backend never creates
+  them. Needs a dedicated tier (the `pov` cluster is M30); a POC `readWrite` user is enough. Budget for it in
+  `seed_data` (timeout 900 s).
+
 ---
 
 ## 9. Driving multi-turn tests

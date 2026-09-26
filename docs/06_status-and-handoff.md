@@ -647,3 +647,72 @@ EC2 launches used: 1. **Open:** (1) add 34.196.57.85 (or the current egress set)
 access list — pod egress rotates, so this recurs; (2) the backend generator's aggregation pipelines should be
 typed `PipelineStage[]` (repair now parses, but untested live); (3) an orchestrator self-handover has not been
 observed live (the resumed run was short; covered by tests with a lowered threshold).
+
+## Round 6 — typed Atlas Search pipelines, search indexes at seed time, medicine-finder proof (2026-09-26)
+
+**Why.** Deploy `run_01M3E9EC8DJ3JEJ0V93VXM90JX` failed `build_backend` on EC2 with TS2769 at
+`src/routes.ts(193,45)`/`(355,47)`: a `$vectorSearch` pipeline typed `Record<string, unknown>[]` passed to mongoose
+`Model.aggregate()` (whose `PipelineStage[]` cannot describe Atlas Search stages). Both repairs then died on
+"Extra data" (fixed in 99231c1). Separately the v001 seed never created the Search/Vector indexes, so the
+fuzzy "paracetmol" query could only hit the regex fallback.
+
+**What changed (commit 33839d6).**
+- **api-agent — typing rule.** `BACKEND_SYSTEM`: every pipeline containing `$search`/`$searchMeta`/`$vectorSearch`
+  is `import type { Document } from "mongodb"; const pipeline: Document[] = [...]` run as
+  `await Model.collection.aggregate(pipeline).toArray()`, never `PipelineStage[]`; `"mongodb": "^6.9.0"` in
+  dependencies. `lint_atlas_search_typing` in `validate_backend` enforces it. Repair prompt: `known_fix_hints()`
+  matches TS2322/TS2345/TS2769 + an Atlas Search signature in the FailureReport and appends
+  "## Known fix for this failure (apply it)".
+- **api-agent — own compile gate.** `typecheck.py`: `npm install` (cached per dependency hash under
+  `$TMPDIR/api-agent-tsc/`) + `tsc --noEmit -p tsconfig.json` on the generated backend, Node from the bundled
+  `nodejs-wheel-binaries>=22,<23` wheel (its `bin/npm` shim is broken → `node …/npm-cli.js`). Diagnostics go back
+  to the model (return only changed files, merged on the previous parse), `MAX_ATTEMPTS=3`, `API_GEN_BUDGET_S=300`,
+  tool timeout 540 s. npm faults the package.json causes (ETARGET/E404/ERESOLVE…) fail; network/no-Node → `skipped`
+  (the deploy build stays the backstop). `API_TYPECHECK=0` disables it (tests do).
+- **data-seeding-agent — indexes.** `search_index_requirements(query_patterns)` extracts every `index: '<name>'`
+  a `$search`/`$vectorSearch` pattern uses; the seed must embed the verbatim `ensureSearchIndexes` helper and call
+  it **after** the inserts (a drop removes a collection's search indexes): create-if-missing by name, tolerate
+  code 68 IndexAlreadyExists, wait until queryable (240 s; timeout warns, real errors throw). `validate_search_indexes`
+  rejects a seed that lacks it, misses a named index or `type: "vectorSearch"`, or pins mongodb < 6.
+- **Cluster tier.** `pov` is **M30 (M30_GEN_2, MongoDB 9.0.2)** — Atlas Search + Vector Search are supported on
+  dedicated tiers and a POC's `readWrite` user may create them. Proven with a temp user on scratch DB
+  `zz_siprobe` (deleted/dropped after): the verbatim helper built both indexes in 29 s, again after drop→re-seed
+  (29 s), and was a no-op on a third call; "paracetmol" → Dolo 650.
+- Tests: api-agent 28 + 1 opt-in (`API_TSC_IT=1` real tsc: bad routes TS2769, good routes pass → 29), seed 17.
+
+**Live proof (session `d709aabe-f9fa-440e-bc0c-a979e1fec132`, user `u_cc`, POC `poc_01M3E2VGD6PRWQXCCJPP2PDR09`).**
+Agents rebuilt: api-agent `bld_01M3EFQQ2H3M9EK2JSS2V49J6Q`, data-seeding-agent `bld_01M3EFQW0446NJ4SD41SYBPNYM`
+(both rolled out 09:15 UTC; smoke invoke → INVALID_ENVELOPE = graph ran).
+
+| stage | run | timing / outcome |
+|---|---|---|
+| code (fresh) | `run_01M3EGA7SABENQ69QEHW4KJKTD` | 09:21:35 → 09:33:41 (**12 m 06 s**) → code **v004**: contract 1 m 33 s, seed 3 m 24 s, backend 2 m 43 s, frontend 2 m 25 s, assemble 21 s. Backend uses `Document[]` + `collection.aggregate` everywhere; local `tsc --noEmit` clean. |
+| deploy | `run_01M3EH87Q5MQ6096DW6ECK6NHG` | 09:37:58 → `deployed` 09:46:04 (**8 m 06 s**): provision_db 19 s, launch_instance 2 m 28 s, fetch 11 s, **seed_data 51 s (incl. both search indexes)**, **build_backend 34 s ✅**, start 21 s, build_frontend 40 s, publish 22 s. |
+| test | `run_01M3EHR415GA92F3GGGBA3PW8G` | 09:46:39 → 09:49:06 (2 m 27 s): 8 passed, 5 failed, 2 skipped, 4 not automatable. |
+| auto-repair | `run_01M3EHY329ZQ59DAK4YCXDY93C` | backend repair → v005 (09:49:54 → 09:54:47) — misdirected, see Open. |
+| teardown | `run_01M3EJ7MAZ13MRXBMBXX13KS9G` | 09:55:07 → 09:55:22 (15 s), POC `torn_down`, instance `i-07cb7857c2b2be071` terminated. |
+| teardown #2 | `run_01M3EJMTPWF2VGP71GDDD5DBQW` | 10:02:19 → 10:02:29, after the resumed deploy run had flipped the status back (see Open). Final: `torn_down`, cloud_resources 6/6 `released`, **0 active**. |
+
+URLs (gone now): App `http://ec2-3-111-213-206.ap-south-1.compute.amazonaws.com/`, API `…/api`, Health `…/api/health`
+→ `200 {"status":"ok","db":"connected"}` (96 ms). `GET /api/search/autocomplete?q=paracetmol` → 200 in 134 ms,
+10 Paracetamol products via `$search` on `autocomplete_index` (searchScore 2); with `limit=20` Dolo 650 / Dolo 500mg /
+Dolo 1000mg are in the list. `GET /api/products/{Crocin 1000mg}/alternatives` → 4 cheaper generics with
+`vectorSearchScore` 0.43–0.52 (real `$vectorSearch` on `vector_index`). EC2 launches used: **1**.
+
+**Open.**
+1. **Repair resumes after teardown.** The deploy run was waiting on the auto-repair; when it finished, the run rewound
+   to `fetch_bundle` on the terminated instance, `seed_data` got `SSM_INVALIDINSTANCEID`, was classified
+   `SEED_ERROR` and fired a *seed* repair (`run_01M3EJ9M0Y155XSNQC321D9E0Y`), and the POC flipped to `deploying`.
+   Stopped by `agentic workspace sessions stop` on the deploy-agent and data-seeding-agent sessions, then a second
+   (idempotent) teardown. No AWS resource was created. Fix: the deploy run must check `pocs.status == torn_down`
+   (or a teardown run newer than itself) before each step and finish `cancelled`; `SSM_INVALIDINSTANCEID` must
+   classify as infra, not a component error. The two runs remain `running` with dead heartbeats until the next
+   chat touch marks them ABANDONED.
+2. **Test agent api_smoke omits required query params** (`api-searchAutocomplete`, `api-searchProducts` → 400
+   "query parameter 'q' is required") — it should fill required params from the contract's examples.
+3. **Frontend testids** missing (`us-01-autocomplete-item`, `us-02-results-item`, `us-03-*`), yet
+   `suspected_component` was `backend`, so the repair targeted the wrong component.
+4. Autocomplete ranks all Paracetamol docs equally (score 2), so the story "Dolo 650 in the top 3" depends on
+   tie order; a brand boost or `score: {boost}` on `brand_name` would make it deterministic.
+5. The in-pod typecheck outcome is logged and returned in the envelope but not persisted on `tasks`; add it to
+   the component manifest if the UI should show it.

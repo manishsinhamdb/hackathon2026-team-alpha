@@ -261,7 +261,7 @@ through the normal chat send path, so busy handling applies. `runs.executions` >
 
 - `GET /api/pocs/:id/artifacts` lists `pocs/{id}/` grouped by stage (spec, code, deploy, test, input), newest
   version or run first. Generated sources, step logs and screenshots are hidden.
-- `GET /api/pocs/:id/artifacts/open?key=…` returns a **presigned GetObject valid for ≤ 5 min**
+- `GET /api/pocs/:id/artifacts/open?key=…` returns a **presigned GetObject valid for 10 min** (`PRESIGN_TTL_SEC = 600`, also the hard cap via `clampPresignTtl` in the real presigner)
   (`{url, expires_in}`, or a 302 with `&redirect=1`, `Cache-Control: no-store`).
   - The key must start with `pocs/{id}/` and must not be the prefix itself.
   - It must contain no `..`, `\`, `//` or control characters, and the id must look like `poc_…`.
@@ -479,3 +479,25 @@ board's polling fails). This is an Atlas UI action for the operator.
 **Verification.** After the build+deploy: `curl https://control-tower.sa-demo.staging.corp.mongodb.com/healthz`
 → `{"status":"ok",...}`; open the host (CorpSecure login), select a POC, confirm the board polls (if the
 board errors on DB reads but chat works, the egress IPs are not yet allow-listed).
+
+## Round 6 — artefact open links (2026-09-26)
+
+- Every stage group (Spec, Code, Deploy, Tests, Input) lists its keys. **open** links to
+  `/api/pocs/:id/artifacts/open?key=…&redirect=1` → a **10-minute, GET-only** presigned URL (`X-Amz-Expires=600`,
+  `x-id=GetObject`) for one key validated to sit under `pocs/{poc_id}/`. The enabled button has the tooltip
+  "Open via a presigned, read-only link (expires in 10 minutes)". Without S3 credentials the button is disabled and
+  its tooltip gives the server's reason (`note`, e.g. "S3 access not configured on the server").
+- Tests: the faked presigner (`fakeStore`) returns `X-Amz-Expires=${ttl}`, and the suite asserts TTL 600 and the
+  clamp (3600 → 600, 0 → 1, NaN → 600). `npm test` → **169**.
+- **Credentials — an operator step.** `control-tower-secrets` in `sa-demo` holds only the 3 platform keys (checked
+  2026-09-26, key names only). The `mongodb/web-app` chart renders a non-optional `secretKeyRef`, so the two AWS
+  env lines in `environments/staging.yaml` stay commented until the keys exist. Otherwise the pod fails with
+  CreateContainerConfigError. Use a dedicated read-only IAM key (s3:GetObject + s3:ListBucket on
+  `msinha-hackathon/pocs/*`) if you have one; otherwise reuse the msinha-poc-builder pair. Order:
+
+  ```bash
+  export KUBECONFIG=~/.kube/config.staging
+  helm ksec set control-tower-secrets AWS_ACCESS_KEY_ID=<access-key-id> AWS_SECRET_ACCESS_KEY=<secret-access-key>
+  # then uncomment AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY under envSecrets in
+  # apps/control-tower/environments/staging.yaml and push to main (Drone rolls pov-gen)
+  ```
