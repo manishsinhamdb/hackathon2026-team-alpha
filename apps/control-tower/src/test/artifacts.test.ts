@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  PRESIGN_TTL_SEC, classifyKey, groupArtifacts, isSafeArtifactKey, keysFromDb, listArtifacts, openArtifact,
+  PRESIGN_TTL_SEC, clampPresignTtl, classifyKey, groupArtifacts, isSafeArtifactKey, keysFromDb, listArtifacts, openArtifact,
   type ArtifactStore,
 } from "@/lib/artifacts";
 import type { RawRun } from "@/lib/aggregate";
@@ -18,7 +18,7 @@ function fakeStore(keys: string[], opts: { failList?: boolean } = {}) {
     },
     async presign(key, ttl) {
       presigned.push({ key, ttl });
-      return `https://s3.example/${key}?sig=x`;
+      return `https://s3.example/${key}?X-Amz-Expires=${ttl}&X-Amz-Signature=x`;
     },
   };
   return { store, presigned };
@@ -124,12 +124,25 @@ describe("keysFromDb (no S3 credentials)", () => {
   });
 });
 
+describe("clampPresignTtl", () => {
+  it("caps the real presigner at 10 minutes", () => {
+    expect(clampPresignTtl(600)).toBe(600);
+    expect(clampPresignTtl(3600)).toBe(600);
+    expect(clampPresignTtl(0)).toBe(1);
+    expect(clampPresignTtl(Number.NaN)).toBe(600);
+  });
+});
+
 describe("openArtifact", () => {
-  it("presigns one validated key for <= 5 minutes", async () => {
+  it("presigns one validated key for 10 minutes", async () => {
     const { store, presigned } = fakeStore([]);
     const res = await openArtifact(store, ID, `${P}spec/v003/poc_spec.md`);
     expect(res.ok).toBe(true);
-    expect(PRESIGN_TTL_SEC).toBeLessThanOrEqual(300);
+    expect(PRESIGN_TTL_SEC).toBe(600);
+    if (res.ok) {
+      expect(res.expires_in).toBe(600);
+      expect(res.url).toContain("X-Amz-Expires=600");
+    }
     expect(presigned).toEqual([{ key: `${P}spec/v003/poc_spec.md`, ttl: PRESIGN_TTL_SEC }]);
   });
   it("rejects a key outside the POC (400) without presigning, and 503s without S3", async () => {

@@ -49,9 +49,12 @@ envSecrets:
   PLATFORM_SA_CLIENT_ID: control-tower-secrets
   PLATFORM_SA_CLIENT_SECRET: control-tower-secrets
   POC_PLATFORM_MONGODB_URI: control-tower-secrets
-  # Optional — read-only S3 credentials for the Artefacts card. Add the two keys to `control-tower-secrets`
-  # FIRST, then uncomment (a secretKeyRef to a missing key blocks pod start). Until then the card falls
-  # back to DB-derived keys with "open" disabled.
+  # Optional — S3 credentials for the Artefacts card (list + 10-min presigned GET under pocs/{poc_id}/).
+  # A dedicated read-only key is preferred; the msinha-poc-builder pair works too. OPERATOR ONLY, in order:
+  #   1. helm ksec set control-tower-secrets AWS_ACCESS_KEY_ID=<key-id> AWS_SECRET_ACCESS_KEY=<secret>
+  #   2. uncomment the two lines below and push to main (Drone rolls the pod).
+  # Never the other way round: the chart renders a non-optional secretKeyRef, so a missing key blocks pod
+  # start. Until then the card lists DB-derived keys with "open" disabled (tooltip says why).
   # AWS_ACCESS_KEY_ID: control-tower-secrets
   # AWS_SECRET_ACCESS_KEY: control-tower-secrets
 

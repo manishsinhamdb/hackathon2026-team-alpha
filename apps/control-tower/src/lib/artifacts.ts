@@ -34,7 +34,12 @@ export interface ArtifactStore {
   presign(key: string, expiresSec: number): Promise<string>;
 }
 
-export const PRESIGN_TTL_SEC = 300; // <= 5 min, read-only GetObject
+export const PRESIGN_TTL_SEC = 600; // 10 min, read-only GetObject — also the hard cap (clampPresignTtl)
+
+// The expiry the real presigner uses: never longer than PRESIGN_TTL_SEC, never below 1 s.
+export function clampPresignTtl(expiresSec: number): number {
+  return Number.isFinite(expiresSec) ? Math.max(1, Math.min(PRESIGN_TTL_SEC, Math.floor(expiresSec))) : PRESIGN_TTL_SEC;
+}
 const MAX_PER_STAGE = 60;
 
 const STAGE_ORDER: ArtifactStage[] = ["spec", "code", "deploy", "test", "input"];
@@ -184,7 +189,7 @@ export async function listArtifacts(args: {
   }
 }
 
-// The open route's logic: validate, then presign ONE key for <= 5 minutes.
+// The open route's logic: validate, then presign ONE key (GetObject only) for 10 minutes.
 export async function openArtifact(
   store: ArtifactStore | null,
   pocId: string,

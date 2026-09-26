@@ -1,4 +1,4 @@
-// GET /api/pocs/:id/artifacts/open?key=pocs/{id}/... -> a short-lived (<= 5 min) presigned, read-only S3
+// GET /api/pocs/:id/artifacts/open?key=pocs/{id}/... -> a short-lived (10 min) presigned, read-only S3
 // GetObject URL for ONE key. The key must start with pocs/{id}/ and contain no "..". Returns JSON
 // {url, expires_in}; with &redirect=1 it 302s straight to the URL (so a plain <a target=_blank> works
 // without popup blockers). The AWS key pair never leaves the server.

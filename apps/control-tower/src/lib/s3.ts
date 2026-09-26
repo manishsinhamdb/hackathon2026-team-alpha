@@ -1,10 +1,10 @@
 // The real ArtifactStore (Round 5, item 2): list objects under a POC prefix and presign ONE GetObject.
 // Server-only — the AWS key pair stays in the server env and never reaches the browser, which only ever
-// receives a short-lived (<= 5 min) presigned URL for a key the BFF has validated.
+// receives a short-lived (10 min) presigned GET URL for a key the BFF has validated.
 import "server-only";
 import { GetObjectCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import type { ArtifactStore } from "./artifacts";
+import { clampPresignTtl, type ArtifactStore } from "./artifacts";
 import { getS3Config } from "./env";
 
 const MAX_KEYS = 2000; // a POC prefix holds generated sources too; cap the walk
@@ -34,7 +34,7 @@ export function getArtifactStore(): ArtifactStore | null {
     },
     async presign(key, expiresSec) {
       return getSignedUrl(client, new GetObjectCommand({ Bucket: cfg.bucket, Key: key }), {
-        expiresIn: Math.min(300, expiresSec),
+        expiresIn: clampPresignTtl(expiresSec),
       });
     },
   };

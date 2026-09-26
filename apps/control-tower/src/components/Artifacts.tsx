@@ -6,6 +6,7 @@ import type { ArtifactList } from "@/lib/artifacts";
 import { Card, CardTitle } from "./ui";
 
 const DISABLED_TIP = "S3 access not configured on the server";
+const OPEN_TIP = "Open via a presigned, read-only link (expires in 10 minutes)";
 
 function fmtSize(n?: number): string {
   if (n == null) return "";
@@ -15,7 +16,7 @@ function fmtSize(n?: number): string {
 }
 
 // The Artefacts card (Round 5, item 2): the POC's S3 objects per stage, each with an "open" link that goes
-// through the BFF (a <= 5 min presigned GET — the AWS keys never reach the browser). Refetches when
+// through the BFF (a 10-min presigned GET — the AWS keys never reach the browser). Refetches when
 // `refreshKey` changes (the board passes a signature of its runs, so a finished stage shows its outputs).
 export default function Artifacts({ pocId, refreshKey }: { pocId: string; refreshKey: string }) {
   const [list, setList] = useState<ArtifactList | null>(null);
@@ -80,6 +81,7 @@ export default function Artifacts({ pocId, refreshKey }: { pocId: string; refres
                   href={`/api/pocs/${encodeURIComponent(pocId)}/artifacts/open?key=${encodeURIComponent(it.key)}&redirect=1`}
                   target="_blank"
                   rel="noreferrer"
+                  title={OPEN_TIP}
                   className="flex shrink-0 items-center gap-1 rounded-md border border-line2 px-2 py-0.5 text-[11px] text-content hover:border-green hover:text-green"
                 >
                   open <ExternalLink className="h-3 w-3" />
@@ -87,7 +89,7 @@ export default function Artifacts({ pocId, refreshKey }: { pocId: string; refres
               ) : (
                 <span
                   aria-disabled
-                  title={DISABLED_TIP}
+                  title={list.note ?? DISABLED_TIP}
                   className="flex shrink-0 cursor-not-allowed items-center gap-1 rounded-md border border-line px-2 py-0.5 text-[11px] text-dim"
                 >
                   open <ExternalLink className="h-3 w-3" />
