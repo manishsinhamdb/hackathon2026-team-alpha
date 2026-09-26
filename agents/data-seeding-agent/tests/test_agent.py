@@ -136,7 +136,7 @@ def test_graph_marks_own_task_done(fake_io, monkeypatch):
     marks = []
     import poc_shared_tools.metadata as md
     monkeypatch.setattr(md, "mark_coder_task",
-                        lambda task_id, status, output_ref=None, token_usage=None, error=None: marks.append((task_id, status, output_ref)))
+                        lambda task_id, status, output_ref=None, token_usage=None, error=None, component=None: marks.append((task_id, status, output_ref)))
     resp = _invoke("generate_seed", {"poc_id": POC, "code_version": "v001",
                                      "inputs": {"schema_key": f"pocs/{POC}/spec/v001/schema_design.json"}})
     assert resp["status"] == "succeeded", resp

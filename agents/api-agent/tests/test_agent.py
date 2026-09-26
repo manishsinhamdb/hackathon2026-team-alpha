@@ -196,11 +196,35 @@ def test_graph_marks_own_task_done(fake_io, monkeypatch):
     marks = []
     import poc_shared_tools.metadata as md
     monkeypatch.setattr(md, "mark_coder_task",
-                        lambda task_id, status, output_ref=None, token_usage=None, error=None: marks.append((task_id, status, output_ref)))
+                        lambda task_id, status, output_ref=None, token_usage=None, error=None, component=None:
+                        marks.append((task_id, status, output_ref, component)))
     resp = _invoke({"poc_id": POC, "code_version": "v001",
                     "inputs": {"spec_key": f"pocs/{POC}/spec/v001/poc_spec.md", "schema_key": "k", "query_patterns_key": "k"}}, "contract")
     assert resp["status"] == "succeeded", resp
-    assert marks == [(TASK, "succeeded", f"pocs/{POC}/code/v001/api_contract.yaml")]
+    assert marks == [(TASK, "succeeded", f"pocs/{POC}/code/v001/api_contract.yaml", "contract")]
+
+
+def test_code_mode_task_gets_distinct_backend_key(fake_io, monkeypatch):
+    """The api agent serves two plan steps; its code-mode task is keyed "backend" (not "contract") so a
+    resumed orchestrator sees the backend step as done instead of re-running it."""
+    monkeypatch.setattr(pipeline, "generate",
+                        lambda *a, **k: (_backend_files(), {"input_tokens": 1, "output_tokens": 1}))
+    marks = []
+    import poc_shared_tools.metadata as md
+    monkeypatch.setattr(md, "mark_coder_task",
+                        lambda task_id, status, output_ref=None, token_usage=None, error=None, component=None:
+                        marks.append((status, component)))
+    resp = _invoke({"poc_id": POC, "code_version": "v001",
+                    "inputs": {"contract_key": f"pocs/{POC}/code/v001/api_contract.yaml", "schema_key": "k"}}, "code")
+    assert resp["status"] == "succeeded", resp
+    assert marks == [("succeeded", "backend")]
+    assert m.task_component_for({"mode": "contract"}) == "contract"
+    assert m.task_component_for({"mode": "repair"}) == "backend"
+    assert m.task_component_for({"params": {"mode": "contract"}}) == "contract"
+    assert m.task_component_for(None) == "backend"
+    # and the shared key derivation agrees for legacy tasks written before `component` was stamped
+    assert md.task_component({"agent": "api_agent", "mode": "code"}) == "backend"
+    assert md.task_component({"agent": "api_agent", "mode": "contract"}) == "contract"
 
 
 def test_graph_invalid_envelope():

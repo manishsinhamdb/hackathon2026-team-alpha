@@ -90,9 +90,10 @@ def seed_execute(envelope_json: str) -> str:
     # Mark our own task in the platform DB (this is our own root session, started via a top-level invoke): the
     # orchestrator disconnected at the ~60s gateway cap and polls this task for the outcome.
     if "error" in out:
-        md.mark_coder_task(task_id, "failed", error=out["error"])
+        md.mark_coder_task(task_id, "failed", error=out["error"], component="seed")
     else:
-        md.mark_coder_task(task_id, "succeeded", output_ref=out.get("artifact_key"), token_usage=out.get("usage"))
+        md.mark_coder_task(task_id, "succeeded", output_ref=out.get("artifact_key"), token_usage=out.get("usage"),
+                           component="seed")
     return json.dumps(out)
 
 

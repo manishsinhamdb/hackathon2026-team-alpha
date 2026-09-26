@@ -53,6 +53,7 @@ def api_execute(envelope_json: str) -> str:
     from poc_shared_tools.errors import ToolError
     from agent_api_agent import pipeline
     task_id: str | None = None
+    env: dict[str, Any] = {}
     try:
         env = validate("agent_envelope", json.loads(envelope_json))["request"]
         task_id = env.get("task_id")
@@ -96,12 +97,23 @@ def api_execute(envelope_json: str) -> str:
     except Exception as e:
         out = {"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:500]}}
     # Mark our own task in the platform DB (own root session, started via a top-level invoke): the
-    # orchestrator disconnected at the ~60s gateway cap and polls this task for the outcome.
+    # orchestrator disconnected at the ~60s gateway cap and polls this task for the outcome. The api agent runs
+    # two plan steps, so stamp the stable task key: "contract" for the contract call, "backend" otherwise.
+    component = task_component_for(env)
     if "error" in out:
-        md.mark_coder_task(task_id, "failed", error=out["error"])
+        md.mark_coder_task(task_id, "failed", error=out["error"], component=component)
     else:
-        md.mark_coder_task(task_id, "succeeded", output_ref=out.get("artifact_key"), token_usage=out.get("usage"))
+        md.mark_coder_task(task_id, "succeeded", output_ref=out.get("artifact_key"), token_usage=out.get("usage"),
+                           component=component)
     return json.dumps(out)
+
+
+def task_component_for(env: dict[str, Any] | None) -> str:
+    """The orchestrator plan step this call serves (its task key): contract mode → "contract"; code and
+    repair → "backend". Distinct from the contract task so a resumed run never confuses the two."""
+    env = env or {}
+    mode = env.get("mode") or (env.get("params") or {}).get("mode") or "code"
+    return "contract" if mode == "contract" else "backend"
 
 
 def _load_frontmatter(s3t: Any, spec_key: str) -> dict[str, Any]:
