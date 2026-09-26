@@ -213,9 +213,12 @@ def orch_end_task(run_id: str, task_id: str, step: str, status: str, artifact_ke
 
 
 def _end_task(run_id: str, task_id: str, step: str, status: str, artifact_key: str = "", produces: str = "",
-              usage: dict[str, int] | None = None) -> None:
+              usage: dict[str, int] | None = None, finish: bool = True) -> None:
+    """Record a coder step's end on the run (step + output key). `finish=False` re-records an already-finished
+    task on resume without touching the task document, so its original ended_at/duration survive."""
     from poc_shared_tools import metadata as md
-    md.finish_task(task_id, status, output_ref=artifact_key or None, token_usage=usage, component=step)
+    if finish:
+        md.finish_task(task_id, status, output_ref=artifact_key or None, token_usage=usage, component=step)
     md.update_run_step(run_id, f"{step}:done", status, output_ref=artifact_key or None)
     if status == "succeeded" and artifact_key:
         field = "outputs.contract_key" if produces == "contract" else f"outputs.component_keys.{step}"
@@ -258,7 +261,7 @@ def orch_step_state(run_id: str, step: str) -> str:
         has_key = (o.get(key_field) if key_field else (o.get("component_keys") or {}).get(step))
         if not recorded or (t.get("output_ref") and not has_key):
             _end_task(run_id, t["task_id"], step, "succeeded", t.get("output_ref", ""),
-                      "contract" if step == "contract" else "component", t.get("token_usage"))
+                      "contract" if step == "contract" else "component", t.get("token_usage"), finish=False)
         return json.dumps({"state": "done", "task_id": t["task_id"], "output_ref": t.get("output_ref", "")})
     if t.get("status") == "running" and not _past_ceiling(t, md):
         return json.dumps({"state": "running", "task_id": t["task_id"]})

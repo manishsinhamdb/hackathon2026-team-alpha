@@ -501,9 +501,12 @@ def test_continue_all_coders_done_runs_only_assemble_and_finalize(fake_md, fake_
     fired = []
     _fake_coder_start(monkeypatch, {k: (lambda env, k=k: fired.append(k)) for k in ("generate-api", "generate-seed", "generate-frontend")})
     _fast_poll(monkeypatch)
+    before = {tid: dict(t) for tid, t in fake_md.tasks.items()}
     resp = _run_graph(_env("continue_run", {"run_id": rid}, mode="continue"))
     assert resp["status"] == "succeeded", resp
     assert fired == []
+    # the finished coder tasks are left untouched (their original ended_at / duration survive the resume)
+    assert all(fake_md.tasks[tid] == t for tid, t in before.items())
     run = fake_md.runs[rid]
     assert run["status"] == "succeeded" and run["executions"] == 1
     assert run["outputs"]["component_keys"]["frontend"] == f"pocs/{POC}/code/v001/frontend/"
