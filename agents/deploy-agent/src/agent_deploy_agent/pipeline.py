@@ -22,6 +22,7 @@ STEPS = ["check_gate", "provision_db", "store_secret", "launch_instance", "fetch
          "build_backend", "start_backend", "build_frontend", "publish_frontend", "write_deployment",
          "run_tests", "finalize"]
 REPAIRABLE = {"seed_data": "seed", "build_backend": "backend", "start_backend": "backend", "build_frontend": "frontend"}
+REPAIR_STEP_FOR = {"seed": "seed_data", "backend": "build_backend", "frontend": "build_frontend"}  # component -> step to repair
 MAX_REPAIRS = 3
 
 

@@ -1,4 +1,8 @@
-"""Exercises the Deploy Agent graph end to end with every cloud step faked at the pipeline boundary."""
+"""Exercises the Deploy Agent graph end to end with every cloud step faked at the pipeline boundary.
+Cross-agent calls (test agent, repair via the coding orchestrator, self-handover) are FIRED through
+platform_invoke.start_invoke; the fakes simulate the callee by writing its run document into FakeMD, which the
+deploy agent's single-call waits (deploy_wait_test_run / deploy_wait_code_run) then find."""
+import contextlib
 import json
 import pytest
 from langchain_core.messages import HumanMessage
@@ -14,6 +18,7 @@ class FakeMD:
     """In-memory stand-in for poc_shared_tools.metadata used by the tools."""
     def __init__(self):
         self.runs, self.pocs = {}, {POC: {"poc_id": POC, "approvals": [{"stage": "code_approved", "version": "v001"}], "status": "code_ready"}}
+        self.touches = {}
     def now(self): return "2026-09-24T12:00:00Z"
     def check_gate(self, poc_id, stage, version): return any(a["version"] == version for a in self.pocs[poc_id]["approvals"])
     def create_run(self, poc_id, stage, requested_by, started_by_agent, inputs=None, trace_id=None):
@@ -34,6 +39,21 @@ class FakeMD:
         if outputs: r["outputs"].update(outputs)
         if error: r["error"] = error
         return r
+    def touch_run(self, run_id): self.touches[run_id] = self.touches.get(run_id, 0) + 1
+    def heartbeat(self, run_id, every_s=30):
+        self.touch_run(run_id); return contextlib.nullcontext()
+    def reopen_run(self, run_id, reason, execution=None):
+        r = self.runs[run_id]
+        if r["status"] in ("succeeded", "cancelled"):
+            from poc_shared_tools.errors import ToolError
+            raise ToolError("RUN_NOT_RESUMABLE", run_id)
+        r["status"] = "running"; r.pop("error", None); r["executions"] = r.get("executions", 0) + 1
+        r.setdefault("continuations", []).append({"reason": reason, "execution": execution}); return dict(r)
+    def add_callee_run(self, stage, inputs, status="succeeded", outputs=None):
+        """What a fired callee (test agent / orchestrator) does in its own root session: write its run doc."""
+        r = {"run_id": new_id("run"), "poc_id": POC, "stage": stage, "status": status, "steps": [], "inputs": inputs,
+             "outputs": outputs or {}, "repair_attempts": {}, "started_at": _real_now()}
+        self.runs[r["run_id"]] = r; return r
     def _db(self):
         md = self
         class Runs:
@@ -41,8 +61,28 @@ class FakeMD:
                 r = md.runs[q["run_id"]]
                 for k, v in u["$set"].items():
                     if k.startswith("outputs."): r["outputs"][k[8:]] = v
+            def find_one(self, q, sort=None):
+                hits = [r for r in md.runs.values() if all(_match(r, k, v) for k, v in q.items())]
+                hits.sort(key=lambda r: r.get("started_at", ""), reverse=True)
+                return json.loads(json.dumps(hits[0])) if hits else None
         class DB: runs = Runs()
         return DB()
+
+
+def _real_now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _match(doc, dotted, want):
+    cur = doc
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    if isinstance(want, dict) and "$gte" in want:
+        return cur >= want["$gte"]
+    return cur == want
 
 
 @pytest.fixture
@@ -76,38 +116,63 @@ def _fake_steps(monkeypatch, fail_at: dict | None = None, counter: dict | None =
 
 
 def _fake_cross_agent(monkeypatch, handlers: dict):
-    """Route platform_invoke.invoke_envelope(skill, env, ...) to the matching synchronous handler. Deploy now
-    calls the test agent ('e2e-tests') and the orchestrator ('code-orchestration') as SYNCHRONOUS top-level
-    invokes; each handler returns Envelope.succeeded(...) == {"response": {...}}, the shape invoke_envelope
-    yields (the platform reply's `response` field carries the callee's AgentEnvelope)."""
+    """Route platform_invoke.start_invoke(skill, env, ...) — a FIRE — to the matching handler, which simulates
+    the callee (writes its run doc into FakeMD). Returns {"status": "started"} like a 504/timeout disconnect."""
     from poc_shared_tools import platform_invoke as pi
+    fired = []
 
-    def fake_invoke_envelope(skill, envelope, *, user_id, session_id, timeout_s=900):
-        return handlers[skill](envelope)
+    def fake_start(skill, envelope, *, user_id, session_id, client_timeout_s=25):
+        fired.append((skill, envelope, session_id))
+        if skill in handlers:
+            handlers[skill](envelope)
+        return {"status": "started"}
 
-    monkeypatch.setattr(pi, "invoke_envelope", fake_invoke_envelope)
+    monkeypatch.setattr(pi, "start_invoke", fake_start)
+    return fired
 
 
-def _invoke(req_tool: str, params: dict, handlers: dict | None = None, monkeypatch=None):
+def _test_agent(md, failed=0, suspected=None):
+    def handler(env):
+        rid_outs = {"failed": failed, "report_key": f"pocs/{POC}/test/x/test_report.json"}
+        if suspected: rid_outs["suspected_component"] = suspected
+        md.add_callee_run("test", {"deployment_run_id": env["request"]["params"]["deployment_run_id"]},
+                          "succeeded" if failed == 0 else "failed", rid_outs)
+    return handler
+
+
+def _orchestrator(md, new_version="v002"):
+    def handler(env):
+        assert env["request"]["tool"] == "repair_component"
+        f = validate("failure_report", env["request"]["params"]["failure"])
+        md.add_callee_run("code", {"code_version": f["code_version"], "component": f["component"], "failure": f},
+                          "succeeded", {"code_version": new_version})
+    return handler
+
+
+def _invoke(req_tool: str, params: dict, handlers: dict | None = None, monkeypatch=None, out_executions: list | None = None):
+    """Run one request; follow self-handovers (continue_run fired at skill deploy-operations) like the platform
+    would — each continuation is a fresh graph execution — until a terminal reply."""
+    handovers = []
     if monkeypatch is not None:
-        _fake_cross_agent(monkeypatch, handlers or {})
-    graph = m.build_agent()
+        _fake_cross_agent(monkeypatch, dict(handlers or {}, **{"deploy-operations": handovers.append}))
     env = Envelope.request(poc_id=POC, run_id=new_id("run"), caller="chat_agent", agent="deploy_agent", tool=req_tool, params=params, task_id=TASK)
-    out = graph.invoke({"messages": [HumanMessage(content=json.dumps(env))]}, config={"configurable": {"thread_id": "t"}})
-    return validate("agent_envelope", json.loads(out["messages"][-1].content))["response"]
+    n = 0
+    while True:
+        out = m.build_agent().invoke({"messages": [HumanMessage(content=json.dumps(env))]}, config={"configurable": {"thread_id": f"t{n}"}})
+        resp = validate("agent_envelope", json.loads(out["messages"][-1].content))["response"]
+        n += 1
+        if resp["status"] != "started" or not handovers:
+            break
+        env = handovers.pop()
+        assert env["request"]["tool"] == "continue_run" and env["request"]["mode"] == "continue"
+    if out_executions is not None:
+        out_executions.append(n)
+    return resp
 
 
 def test_happy_path_with_tests(fake_md, monkeypatch):
     counter = _fake_steps(monkeypatch)
-    def test_agent(env):
-        # The test agent runs the whole suite in its own root session and replies `succeeded` synchronously
-        # (no fast-ack) with the report in `result`.
-        rid = new_id("run")
-        report_key = f"pocs/{POC}/test/{rid}/test_report.json"
-        return Envelope.succeeded(env["request"]["task_id"],
-                                  {"run_id": rid, "failed": 0, "report_key": report_key},
-                                  [Envelope.artifact("report", report_key)])
-    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {}}, {"e2e-tests": test_agent}, monkeypatch)
+    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {}}, {"e2e-tests": _test_agent(fake_md)}, monkeypatch)
     assert resp["status"] == "succeeded", resp
     assert resp["result"]["urls"]["app"] == "http://1.2.3.4/" and resp["result"]["test_passed"] is True
     assert [a["kind"] for a in resp["artifacts"]] == ["deployment", "report"]
@@ -124,13 +189,7 @@ def test_gate_refused(fake_md, monkeypatch):
 
 def test_repair_loop_then_success(fake_md, monkeypatch):
     counter = _fake_steps(monkeypatch, fail_at={"build_frontend": 1})
-    def orchestrator(env):
-        # Repair is a SYNCHRONOUS top-level invoke: the orchestrator runs the repair code run to completion
-        # in its own root session and replies `succeeded` with the new code_version.
-        assert env["request"]["tool"] == "repair_component"
-        validate("failure_report", env["request"]["params"]["failure"])
-        rid = new_id("run")
-        return Envelope.succeeded(env["request"]["task_id"], {"run_id": rid, "code_version": "v002"})
+    orchestrator = _orchestrator(fake_md)
     import poc_shared_tools.s3 as s3
     monkeypatch.setattr(s3, "put_object", lambda *a, **k: {"key": a[2]})
     monkeypatch.setattr(s3, "get_text", lambda key: json.dumps({"bundle_key": key.replace("poc.manifest.json", "bundle.tar.gz"), "contract_key": key.replace("poc.manifest.json", "api_contract.yaml")}))
@@ -143,9 +202,7 @@ def test_repair_loop_then_success(fake_md, monkeypatch):
 
 def test_repair_exhausted_fails_cleanly(fake_md, monkeypatch):
     _fake_steps(monkeypatch, fail_at={"build_frontend": 99})
-    def orchestrator(env):
-        rid = new_id("run")
-        return Envelope.succeeded(env["request"]["task_id"], {"run_id": rid, "code_version": "v002"})
+    orchestrator = _orchestrator(fake_md)
     import poc_shared_tools.s3 as s3
     monkeypatch.setattr(s3, "put_object", lambda *a, **k: {"key": a[2]})
     monkeypatch.setattr(s3, "get_text", lambda key: json.dumps({"bundle_key": "pocs/x/code/v002/bundle.tar.gz", "contract_key": "pocs/x/code/v002/api_contract.yaml"}))
@@ -228,10 +285,12 @@ def _fake_platform_http(monkeypatch, state):
             if state["invoke"] == 1:  # first call: expired token -> 401 -> one refresh + retry
                 return 401, b'{"error":"unauthorized"}'
             req = json.loads(json.loads(data)["message"])["request"]
-            rid = new_id("run")
-            report_key = f"pocs/{POC}/test/{rid}/test_report.json"
-            inner = Envelope.succeeded(req["task_id"], {"run_id": rid, "failed": 0, "report_key": report_key},
-                                       [Envelope.artifact("report", report_key)])
+            # the fired test agent writes its run doc (root session); the deploy agent's wait finds it
+            import poc_shared_tools.metadata as _md
+            _md._db  # FakeMD is installed; write through the fixture's instance
+            state["md"].add_callee_run("test", {"deployment_run_id": req["params"]["deployment_run_id"]}, "succeeded",
+                                       {"failed": 0, "report_key": f"pocs/{POC}/test/x/test_report.json"})
+            inner = Envelope.started(req["task_id"], new_id("run"))
             return 200, json.dumps({"success": True, "response": json.dumps(inner), "status": "completed"}).encode()
         raise AssertionError(f"unexpected URL {url}")
 
@@ -240,7 +299,7 @@ def _fake_platform_http(monkeypatch, state):
 
 def test_deploy_test_goes_through_platform_invoke_and_refreshes_token_on_401(fake_md, monkeypatch):
     counter = _fake_steps(monkeypatch)
-    state = {"token": 0, "invoke": 0}
+    state = {"token": 0, "invoke": 0, "md": fake_md}
     _fake_platform_http(monkeypatch, state)
     graph = m.build_agent()
     env = Envelope.request(poc_id=POC, run_id=new_id("run"), caller="chat_agent", agent="deploy_agent",
@@ -251,3 +310,104 @@ def test_deploy_test_goes_through_platform_invoke_and_refreshes_token_on_401(fak
     assert resp["status"] == "succeeded" and resp["result"]["test_passed"] is True, resp
     assert state["invoke"] == 2   # one 401, then the retry succeeds
     assert state["token"] == 2    # initial mint + exactly one forced refresh
+
+
+# =============================================================================
+# Resilient runs: self-handover, continue_run of an abandoned run, single-call
+# bounded waits, heartbeat inside long steps.
+# =============================================================================
+
+def test_self_handover_carries_a_deploy_across_executions(fake_md, monkeypatch):
+    monkeypatch.setattr(m, "HANDOVER_TOOL_CALLS", 5)
+    counter = _fake_steps(monkeypatch)
+    execs = []
+    resp = _invoke("start_deploy_run", {"code_version": "v001", "options": {}}, {"e2e-tests": _test_agent(fake_md)},
+                   monkeypatch, out_executions=execs)
+    assert resp["status"] == "succeeded" and resp["result"]["test_passed"] is True, resp
+    assert execs[0] >= 2
+    assert all(v == 1 for v in counter.values()), counter          # no step re-executed across executions
+    run = next(r for r in fake_md.runs.values() if r["stage"] == "deploy")
+    assert run["executions"] == execs[0] - 1
+    assert len([r for r in fake_md.runs.values() if r["stage"] == "test"]) == 1  # tests fired once
+
+
+def _abandoned_deploy(md, last_done: str, *, inflight=None, with_index=True):
+    run = md.create_run(POC, "deploy", "chat_agent", "deploy_agent", {"code_version": "v001", "options": {}})
+    rid = run["run_id"]
+    for st in pipeline.STEPS[:pipeline.STEPS.index(last_done) + 1]:
+        md.update_run_step(rid, st, "succeeded")
+    md.runs[rid]["outputs"].update({"code_version": "v001", "urls": {"app": "http://1.2.3.4/"},
+                                    "deployment_key": f"pocs/{POC}/deploy/x/deployment.json"})
+    if with_index and last_done != "run_tests":
+        md.runs[rid]["outputs"]["resume_step_index"] = pipeline.STEPS.index(last_done) + 1
+    if inflight:
+        md.runs[rid]["outputs"]["inflight"] = inflight
+    md.pocs[POC]["status"] = "deploying"
+    return rid
+
+
+def test_continue_reattaches_to_the_in_flight_test_run(fake_md, monkeypatch):
+    """The 2026-09-25 failure: the execution died at run_tests while the (already fired) test run went on to
+    pass. continue_run re-executes NO step and fires NO new test run — it finds the verdict and finishes."""
+    counter = _fake_steps(monkeypatch)
+    rid = _abandoned_deploy(fake_md, "run_tests", inflight={"kind": "test", "fired_at": _real_now()}, with_index=False)
+    fake_md.add_callee_run("test", {"deployment_run_id": rid}, "succeeded", {"failed": 0, "report_key": f"pocs/{POC}/test/x/test_report.json"})
+    fired = []
+    resp = _invoke("continue_run", {"run_id": rid}, {"e2e-tests": fired.append}, monkeypatch)
+    assert resp["status"] == "succeeded", resp
+    assert fired == [] and counter.get("run_tests", 0) == 0
+    assert set(counter) == {"finalize"}
+    assert fake_md.runs[rid]["status"] == "succeeded" and fake_md.runs[rid]["executions"] == 1
+
+
+def test_continue_resumes_at_first_step_not_done(fake_md, monkeypatch):
+    counter = _fake_steps(monkeypatch)
+    rid = _abandoned_deploy(fake_md, "build_backend")
+    resp = _invoke("continue_run", {"run_id": rid}, {"e2e-tests": _test_agent(fake_md)}, monkeypatch)
+    assert resp["status"] == "succeeded", resp
+    assert set(counter) == {"start_backend", "build_frontend", "publish_frontend", "write_deployment", "run_tests", "finalize"}
+
+
+def test_legacy_run_without_resume_index_does_not_skip_unverified_tests():
+    run = {"steps": [{"name": s, "status": "succeeded"} for s in pipeline.STEPS[:pipeline.STEPS.index("run_tests") + 1]],
+           "outputs": {}}
+    assert m.resume_index(run) == pipeline.STEPS.index("run_tests")
+    run["outputs"]["test_passed"] = True
+    assert m.resume_index(run) == pipeline.STEPS.index("finalize")
+
+
+def test_continue_is_idempotent_on_a_succeeded_deploy(fake_md, monkeypatch):
+    _fake_steps(monkeypatch)
+    rid = _abandoned_deploy(fake_md, "finalize")
+    fake_md.runs[rid]["status"] = "succeeded"
+    resp = _invoke("continue_run", {"run_id": rid}, {}, monkeypatch)
+    assert resp["status"] == "succeeded" and resp["result"]["already"] == "succeeded"
+
+
+def test_long_step_headroom_hands_over_early(monkeypatch):
+    monkeypatch.setattr(m, "HANDOVER_AFTER_S", 360)
+    st = {"exec_started": 1000.0, "tool_calls": 3, "calls_base": 0}
+    assert not m.over_budget(st, "seed_data", now=1200.0)
+    assert m.over_budget(st, "launch_instance", now=1200.0)       # 200 s in: a 2-4 min launch would overrun
+    assert m.over_budget(st, None, now=1361.0)
+
+
+def test_wait_test_run_is_one_bounded_call(fake_md, monkeypatch):
+    monkeypatch.setattr(m, "POLL_S", 0.05)
+    rid = _abandoned_deploy(fake_md, "write_deployment")
+    t = fake_md.add_callee_run("test", {"deployment_run_id": rid}, "running")
+    w = json.loads(m.deploy_wait_test_run(rid, _real_now(), 1))
+    assert w["status"] == "running" and fake_md.touches[rid] >= 1
+    fake_md.runs[t["run_id"]]["status"] = "succeeded"
+    assert json.loads(m.deploy_wait_test_run(rid, _real_now(), 1))["status"] == "succeeded"
+    monkeypatch.setattr(m, "CALLEE_APPEAR_S", 0)
+    other = _abandoned_deploy(fake_md, "write_deployment")
+    assert json.loads(m.deploy_wait_test_run(other, "2026-09-26T00:00:00Z", 1))["status"] == "missing"
+
+
+def test_execute_step_heartbeats_the_run(fake_md, monkeypatch):
+    _fake_steps(monkeypatch)
+    rid = _abandoned_deploy(fake_md, "check_gate")
+    json.loads(m.deploy_execute_step(rid, "provision_db"))
+    assert fake_md.touches[rid] >= 1
+    assert fake_md.runs[rid]["outputs"]["resume_step_index"] == pipeline.STEPS.index("provision_db") + 1
