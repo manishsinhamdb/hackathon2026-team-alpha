@@ -237,7 +237,7 @@ def fake_meta(monkeypatch):
     """Fake the platform-DB run/POC calls the graph makes (start_run, finish_run, finalize side effects).
     Returns a log capturing the run lifecycle so tests can assert registration + finish."""
     import poc_shared_tools.metadata as metadata
-    log: dict[str, list] = {"created": [], "finished": []}
+    log: dict[str, list] = {"created": [], "finished": [], "heartbeats": []}
 
     def fake_create_run(poc_id, stage, requested_by, started_by_agent, inputs=None, trace_id=None):
         log["created"].append({"poc_id": poc_id, "stage": stage, "inputs": inputs, "by": requested_by})
@@ -247,7 +247,15 @@ def fake_meta(monkeypatch):
         log["finished"].append({"run_id": run_id, "status": status, "outputs": outputs, "error": error})
         return {"run_id": run_id, "status": status}
 
+    from contextlib import contextmanager
+
+    @contextmanager
+    def fake_heartbeat(run_id, every_s=30):
+        log["heartbeats"].append(run_id)
+        yield
+
     monkeypatch.setattr(metadata, "create_run", fake_create_run)
+    monkeypatch.setattr(metadata, "heartbeat", fake_heartbeat)
     monkeypatch.setattr(metadata, "set_run_status", lambda *a, **k: None)
     monkeypatch.setattr(metadata, "finish_run", fake_finish_run)
     monkeypatch.setattr(metadata, "set_current_version", lambda *a, **k: None)
@@ -373,6 +381,8 @@ def test_graph_drafted_registers_and_finishes_run_succeeded(fake_io, monkeypatch
     fin = meta["finished"][0]
     assert fin["status"] == "succeeded" and fin["outputs"]["spec_version"] == "v001"
     assert any("/spec/v001/" in k for k, _ in fake_io["puts"])
+    # every long step heartbeats the platform draft run (load, analyze, generate, finalize)
+    assert meta["heartbeats"] == ["run_test"] * 4
 
 
 def test_graph_invalid_transcript(fake_meta, monkeypatch):

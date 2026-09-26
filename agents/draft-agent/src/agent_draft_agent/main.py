@@ -59,7 +59,15 @@ PENDING_KEY = "pocs/{poc_id}/spec/pending/clarifications.json"
 # =============================================================================
 
 @app.tool(timeout=120)
-def draft_load(envelope_json: str) -> str:
+def draft_load(envelope_json: str, run_id: str = "") -> str:
+    """Load the transcript from S3 and any pending clarification rounds; fold in params.answers.
+    Returns {"transcript", "prior_rounds", "round_no"} or {"error": {...}} (INVALID_TRANSCRIPT).
+    Heartbeats the draft run (`run_id`, the platform run) while it works."""
+    with _alive(run_id):
+        return _draft_load(envelope_json=envelope_json)
+
+
+def _draft_load(envelope_json: str) -> str:
     """Load the transcript from S3 and any pending clarification rounds; fold in params.answers.
     Returns {"transcript", "prior_rounds", "round_no"} or {"error": {...}} (INVALID_TRANSCRIPT)."""
     from poc_shared_tools import s3 as s3t
@@ -89,7 +97,14 @@ def draft_load(envelope_json: str) -> str:
 
 
 @app.tool(timeout=300)
-def draft_analyze(envelope_json: str, transcript: str, prior_rounds_json: str) -> str:
+def draft_analyze(envelope_json: str, transcript: str, prior_rounds_json: str, run_id: str = "") -> str:
+    """Completeness analysis (LLM, JSON only). Returns {"extraction", "missing", "usage"} or {"error"}.
+    Heartbeats the draft run (`run_id`, the platform run) while it works."""
+    with _alive(run_id):
+        return _draft_analyze(envelope_json=envelope_json, transcript=transcript, prior_rounds_json=prior_rounds_json)
+
+
+def _draft_analyze(envelope_json: str, transcript: str, prior_rounds_json: str) -> str:
     """Completeness analysis (LLM, JSON only). Returns {"extraction", "missing", "usage"} or {"error"}."""
     from agent_draft_agent import pipeline
     try:
@@ -104,6 +119,15 @@ def draft_analyze(envelope_json: str, transcript: str, prior_rounds_json: str) -
 
 @app.tool(timeout=300)
 def draft_questions(envelope_json: str, extraction_json: str, missing_json: str, round_no: int,
+                    prior_rounds_json: str, run_id: str = "") -> str:
+    """Generate <=5 clarifying questions, persist them to the pending clarifications file.
+    Returns {"questions", "usage"} or {"error"}.
+    Heartbeats the draft run (`run_id`, the platform run) while it works."""
+    with _alive(run_id):
+        return _draft_questions(envelope_json=envelope_json, extraction_json=extraction_json, missing_json=missing_json, round_no=round_no, prior_rounds_json=prior_rounds_json)
+
+
+def _draft_questions(envelope_json: str, extraction_json: str, missing_json: str, round_no: int,
                     prior_rounds_json: str) -> str:
     """Generate <=5 clarifying questions, persist them to the pending clarifications file.
     Returns {"questions", "usage"} or {"error"}."""
@@ -132,7 +156,16 @@ def draft_questions(envelope_json: str, extraction_json: str, missing_json: str,
 
 
 @app.tool(timeout=300)
-def draft_generate(envelope_json: str, extraction_json: str, prior_rounds_json: str) -> str:
+def draft_generate(envelope_json: str, extraction_json: str, prior_rounds_json: str, run_id: str = "") -> str:
+    """Allocate the next spec version, generate + validate the three artifacts, write all four spec files.
+    Returns {"spec_version", "spec_key", "keys", "assumptions", "user_story_count", "poc_definitions", "usage"}
+    or {"error"}.
+    Heartbeats the draft run (`run_id`, the platform run) while it works."""
+    with _alive(run_id):
+        return _draft_generate(envelope_json=envelope_json, extraction_json=extraction_json, prior_rounds_json=prior_rounds_json)
+
+
+def _draft_generate(envelope_json: str, extraction_json: str, prior_rounds_json: str) -> str:
     """Allocate the next spec version, generate + validate the three artifacts, write all four spec files.
     Returns {"spec_version", "spec_key", "keys", "assumptions", "user_story_count", "poc_definitions", "usage"}
     or {"error"}."""
@@ -176,7 +209,15 @@ def draft_generate(envelope_json: str, extraction_json: str, prior_rounds_json: 
 
 
 @app.tool(timeout=120)
-def draft_finalize(envelope_json: str, spec_version: str, spec_key: str, poc_definitions_json: str) -> str:
+def draft_finalize(envelope_json: str, spec_version: str, spec_key: str, poc_definitions_json: str, run_id: str = "") -> str:
+    """Side effects (§6.2 step 5): set current spec version + status spec_ready; RAG-index the spec into
+    spec_embeddings (best-effort); tombstone the pending clarifications file. Returns {"ok", "indexed"}.
+    Heartbeats the draft run (`run_id`, the platform run) while it works."""
+    with _alive(run_id):
+        return _draft_finalize(envelope_json=envelope_json, spec_version=spec_version, spec_key=spec_key, poc_definitions_json=poc_definitions_json)
+
+
+def _draft_finalize(envelope_json: str, spec_version: str, spec_key: str, poc_definitions_json: str) -> str:
     """Side effects (§6.2 step 5): set current spec version + status spec_ready; RAG-index the spec into
     spec_embeddings (best-effort); tombstone the pending clarifications file. Returns {"ok", "indexed"}."""
     from poc_shared_tools import metadata, s3 as s3t
@@ -211,6 +252,13 @@ def draft_finalize(envelope_json: str, spec_version: str, spec_key: str, poc_def
         return json.dumps({"error": {"code": e.code, "message": str(e)[:800], "retryable": e.retryable}})
     except Exception as e:  # pragma: no cover - defensive
         return json.dumps({"error": {"code": getattr(e, "code", "RUNNER_FAILED"), "message": str(e)[:400]}})
+
+
+def _alive(run_id: str) -> Any:
+    """Keep the draft run's heartbeat fresh during a long tool so it is never mistaken for abandoned."""
+    from contextlib import nullcontext
+    from poc_shared_tools import metadata as md
+    return md.heartbeat(run_id) if run_id else nullcontext()
 
 
 @app.tool(timeout=60)
@@ -381,7 +429,7 @@ def build_agent() -> CompiledStateGraph:
         if state.get("done"):
             return {}
         req = state["request"]
-        r = call("draft_load", envelope_json=_envelope_json(state))
+        r = call("draft_load", run_id=state.get("run_id") or "", envelope_json=_envelope_json(state))
         if "error" in r:
             e = r["error"]
             return fail(state, Envelope.failed(req["task_id"], e["code"], e["message"], e.get("retryable", False)))
@@ -392,7 +440,7 @@ def build_agent() -> CompiledStateGraph:
         if state.get("done"):
             return {}
         req = state["request"]
-        r = call("draft_analyze", envelope_json=_envelope_json(state),
+        r = call("draft_analyze", run_id=state.get("run_id") or "", envelope_json=_envelope_json(state),
                  transcript=state["transcript"], prior_rounds_json=json.dumps(state["prior_rounds"]))
         if "error" in r:
             e = r["error"]
@@ -414,7 +462,7 @@ def build_agent() -> CompiledStateGraph:
     # -- questions -----------------------------------------------------------
     def questions_node(state: DraftState) -> dict[str, Any]:
         req = state["request"]
-        r = call("draft_questions", envelope_json=_envelope_json(state),
+        r = call("draft_questions", run_id=state.get("run_id") or "", envelope_json=_envelope_json(state),
                  extraction_json=json.dumps(state["extraction"]), missing_json=json.dumps(state["missing"]),
                  round_no=state["round_no"], prior_rounds_json=json.dumps(state["prior_rounds"]))
         if "error" in r:
@@ -433,7 +481,7 @@ def build_agent() -> CompiledStateGraph:
     # -- generate ------------------------------------------------------------
     def generate_node(state: DraftState) -> dict[str, Any]:
         req = state["request"]
-        r = call("draft_generate", envelope_json=_envelope_json(state),
+        r = call("draft_generate", run_id=state.get("run_id") or "", envelope_json=_envelope_json(state),
                  extraction_json=json.dumps(state["extraction"]), prior_rounds_json=json.dumps(state["prior_rounds"]))
         if "error" in r:
             e = r["error"]
@@ -450,7 +498,7 @@ def build_agent() -> CompiledStateGraph:
             return {}
         req = state["request"]
         gen = state["result"]["_gen"]
-        r = call("draft_finalize", envelope_json=_envelope_json(state), spec_version=state["spec_version"],
+        r = call("draft_finalize", run_id=state.get("run_id") or "", envelope_json=_envelope_json(state), spec_version=state["spec_version"],
                  spec_key=state["spec_key"], poc_definitions_json=json.dumps(state["poc_definitions"]))
         if "error" in r:
             e = r["error"]
