@@ -152,6 +152,11 @@ export default function PipelineBoard({
 
   const { poc, stages, coders, runHistory, clarification, deployment, test, cloudResources } = detail;
   const codeRun = detail.runs.find((r) => r.stage === "code");
+  // The currently-running stage run, surfaced in the header with its run id (and platform execution id when
+  // the DB records one — the current schema does not, so it's usually absent) — item 4.
+  const runningRun = detail.runs.find(
+    (r) => r.status === "running" || r.status === "queued" || r.status === "waiting_user",
+  );
   const active = cloudResources.activeCount;
   const remainingMs = nextPollAtRef.current ? Math.max(0, nextPollAtRef.current - nowMs) : intervalMs;
 
@@ -161,6 +166,18 @@ export default function PipelineBoard({
       <div className="flex h-[52px] shrink-0 items-center gap-3 border-b border-line px-6">
         <div className="font-sora text-sm font-semibold">Pipeline</div>
         <CopyId value={poc.poc_id} className="text-xs" />
+        {runningRun && (
+          <span className="flex items-center gap-1.5 text-xs text-faint" title={`${runningRun.stage} run in progress`}>
+            <span className="text-run">● {runningRun.stage}</span>
+            <CopyId value={runningRun.run_id} className="text-xs" />
+            {runningRun.execution_id && (
+              <>
+                <span className="text-dim">exec</span>
+                <CopyId value={runningRun.execution_id} className="text-xs" />
+              </>
+            )}
+          </span>
+        )}
         <span className="flex-1" />
         <PollIndicator
           error={!!error}

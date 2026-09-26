@@ -5,6 +5,8 @@ import Link from "next/link";
 import { Paperclip, Send } from "lucide-react";
 import type { ConversationMessage } from "@/lib/types";
 import { pocIdIn } from "@/lib/live";
+import { postChat, type ChatOutcome } from "@/lib/chat";
+import { useSessionBusy } from "@/lib/useSessionStatus";
 import { useToast } from "./Toasts";
 import MessageBubble, { ReplyingPill } from "./MessageBubble";
 
@@ -13,6 +15,17 @@ interface LiveMessage {
   content: string;
   at: number;
 }
+
+// A message waiting for the session to free (after a 409 SESSION_BUSY), plus when it was queued (for the
+// live timer). The user's message bubble is already shown; only the reply is pending.
+interface Queued {
+  message: string;
+  display?: string;
+  since: number;
+}
+
+const RETRY_MS = 5_000; // poll the busy session every 5 s, then auto-send when free
+const CONFIRM_AGE_MS = 30_000; // confirm before stopping a turn older than this
 
 // Compact action chips. `label` is what the transcript shows; `message` is the canned text actually sent
 // to the chat agent — unchanged from the original wiring so behaviour is identical.
@@ -44,15 +57,113 @@ export default function Chat({
   const [recovered, setRecovered] = useState<ConversationMessage[]>([]);
   const [showRecovered, setShowRecovered] = useState(false);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState(false); // our own turn is in flight
+  const [queued, setQueued] = useState<Queued | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const logRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const toast = useToast();
 
-  // Reset live transcript when the session id changes ("New session").
+  // Guards: bumped to invalidate an in-flight send (on Stop) or the queue retry loop (on New session/Stop).
+  const sendGuardRef = useRef(0);
+  const queueGuardRef = useRef(0);
+  // A message to send once a freshly-created session becomes active ("New session" while queued).
+  const carryoverRef = useRef<{ message: string; display?: string } | null>(null);
+
+  // Busy status of this session from the runtime-sessions poll (drives the header dot + a header Stop when a
+  // turn is running but not one we started locally, e.g. a previously-accepted "pending" turn).
+  const busyMap = useSessionBusy(sessionId ? [sessionId] : []);
+  const sessionBusy = !!busyMap[sessionId];
+
+  const pushAssistant = useCallback(
+    (outcome: Extract<ChatOutcome, { kind: "ok" }>) => {
+      setMessages((m) => [...m, { role: "assistant", content: outcome.reply, at: Date.now() }]);
+      const detected = pocIdIn(String(outcome.reply ?? ""));
+      if (detected) onPocDetected?.(detected);
+    },
+    [onPocDetected],
+  );
+
+  const pushError = useCallback(
+    (outcome: Extract<ChatOutcome, { kind: "error" }>) => {
+      setMessages((m) => [...m, { role: "system", content: `⚠ ${outcome.message}`, at: Date.now() }]);
+      toast.show({ message: outcome.message, tone: "error", detail: outcome.detail });
+    },
+    [toast],
+  );
+
+  const send = useCallback(
+    async (text: string, display?: string) => {
+      const message = text.trim();
+      if (!message || !sessionId || busy || queued) return;
+      setMessages((m) => [...m, { role: "user", content: (display ?? text).trim(), at: Date.now() }]);
+      setInput("");
+      const guard = ++sendGuardRef.current;
+      setBusy(true);
+      setTurnStartedAt(Date.now());
+      const outcome = await postChat(fetch, { session_id: sessionId, message });
+      if (sendGuardRef.current !== guard) return; // this turn was stopped/superseded — ignore its result
+      setBusy(false);
+      setTurnStartedAt(null);
+      if (outcome.kind === "busy") {
+        setQueued({ message, display, since: Date.now() }); // starts the retry loop (effect below)
+      } else if (outcome.kind === "error") {
+        pushError(outcome);
+        onSent();
+      } else {
+        pushAssistant(outcome);
+        onSent();
+      }
+    },
+    [sessionId, busy, queued, onSent, pushAssistant, pushError],
+  );
+
+  // Keep a stable ref to the latest `send` so the session-change effect (carryover) can call it without a
+  // stale closure and without re-running on every send identity change.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+
+  // The busy-queue retry loop: poll the session (a fresh invoke of the same message) until it's no longer
+  // busy, then land the reply. A 409 means the send was rejected (not enqueued), so re-attempting is safe;
+  // any non-busy outcome stops the loop, so an accepted turn is never sent twice.
+  useEffect(() => {
+    if (!queued) return;
+    const guard = ++queueGuardRef.current;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const attempt = async () => {
+      if (queueGuardRef.current !== guard) return;
+      const outcome = await postChat(fetch, { session_id: sessionId, message: queued.message });
+      if (queueGuardRef.current !== guard) return;
+      if (outcome.kind === "busy") {
+        timer = setTimeout(attempt, RETRY_MS);
+        return;
+      }
+      setQueued(null);
+      if (outcome.kind === "ok") pushAssistant(outcome);
+      else if (outcome.kind === "error") pushError(outcome);
+      onSent();
+    };
+    attempt(); // immediate first retry (covers re-arm after a Stop); 409s cheaply if still busy
+    return () => {
+      queueGuardRef.current += 1;
+      if (timer) clearTimeout(timer);
+    };
+  }, [queued, sessionId, onSent, pushAssistant, pushError]);
+
+  // Reset live transcript when the session id changes ("New session"); send any carried-over message.
   useEffect(() => {
     setMessages([]);
+    setQueued(null);
+    queueGuardRef.current += 1;
+    const carry = carryoverRef.current;
+    if (carry) {
+      carryoverRef.current = null;
+      const t = setTimeout(() => sendRef.current(carry.message, carry.display), 0);
+      return () => clearTimeout(t);
+    }
   }, [sessionId]);
 
   // Recover the selected POC's stored conversation on load / selection.
@@ -77,45 +188,54 @@ export default function Chat({
     };
   }, [pocId]);
 
+  // 1 s ticker for the queued timer / turn age (only runs while something is pending).
+  useEffect(() => {
+    if (!queued && !busy) return;
+    const t = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [queued, busy]);
+
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, recovered, busy, showRecovered]);
+  }, [messages, recovered, busy, queued, showRecovered]);
 
-  const send = useCallback(
-    async (text: string, display?: string) => {
-      const message = text.trim();
-      if (!message || !sessionId || busy) return;
-      setMessages((m) => [...m, { role: "user", content: (display ?? text).trim(), at: Date.now() }]);
-      setInput("");
-      setBusy(true);
+  // Cancel the running turn on this session (item 3). Confirm only for a turn older than 30 s.
+  const stopTurn = useCallback(
+    async (opts?: { ageMs?: number; rearmQueue?: boolean }) => {
+      if (!sessionId) return;
+      const age = opts?.ageMs ?? (turnStartedAt ? Date.now() - turnStartedAt : 0);
+      if (age > CONFIRM_AGE_MS && !window.confirm("This turn has been running a while. Stop it?")) return;
+      setStopping(true);
+      sendGuardRef.current += 1; // ignore any in-flight send result
       try {
-        const res = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: sessionId, message }),
-        });
-        const data = await res.json();
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stop`, { method: "POST" });
+        const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          const err = data.error || `HTTP ${res.status}`;
-          setMessages((m) => [...m, { role: "system", content: `⚠ ${err}`, at: Date.now() }]);
-          toast.error(`Chat failed: ${err}`);
+          toast.show({ message: data.error || "Couldn’t stop the running turn.", tone: "error", detail: data.detail });
         } else {
-          setMessages((m) => [...m, { role: "assistant", content: data.reply, at: Date.now() }]);
-          // If the reply names a POC (e.g. a just-drafted one), let the workspace auto-follow it.
-          const detected = pocIdIn(String(data.reply ?? ""));
-          if (detected) onPocDetected?.(detected);
+          setMessages((m) => [...m, { role: "system", content: "⏹ Turn cancelled.", at: Date.now() }]);
         }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setMessages((m) => [...m, { role: "system", content: `⚠ ${msg}`, at: Date.now() }]);
-        toast.error(`Chat failed: ${msg}`);
+      } catch {
+        toast.error("Couldn’t stop the running turn.");
       } finally {
+        setStopping(false);
         setBusy(false);
-        onSent(); // nudge the board to refresh right away + bump the session turn count
+        setTurnStartedAt(null);
+        // Re-arm the queue loop so a queued message sends promptly now the session is freeing.
+        if (opts?.rearmQueue) setQueued((q) => (q ? { ...q } : q));
+        onSent();
       }
     },
-    [sessionId, busy, onSent, toast, onPocDetected],
+    [sessionId, turnStartedAt, toast, onSent],
   );
+
+  // "New session" while queued: move the pending message to a fresh session and send it there.
+  const queueToNewSession = useCallback(() => {
+    if (queued) carryoverRef.current = { message: queued.message, display: queued.display };
+    setQueued(null);
+    queueGuardRef.current += 1;
+    onNewSession();
+  }, [queued, onNewSession]);
 
   // Canned actions operate on the SELECTED POC. The chat agent resolves the POC from natural language, so
   // we append the poc_id to the message. The transcript still shows the friendly label. Free-typed messages
@@ -141,14 +261,30 @@ export default function Chat({
     }
   };
 
-  const canSend = !!sessionId && !busy;
+  const canSend = !!sessionId && !busy && !queued && !stopping;
+  // A running turn we can stop: our own in-flight turn, or a turn the status poll sees on this session.
+  const showHeaderStop = (sessionBusy || busy) && !queued;
 
   return (
     <section className="flex h-full min-h-0 flex-col border-r border-line bg-ink">
       {/* Header */}
       <div className="flex h-[52px] shrink-0 items-center gap-3 border-b border-line px-5">
         <div className="font-sora text-sm font-semibold">Conversation</div>
-        <span className="font-mono text-xs text-faint">session {sessionId || "…"}</span>
+        <span className="flex items-center gap-1.5 font-mono text-xs text-faint">
+          {(sessionBusy || busy) && (
+            <span className="h-2 w-2 rounded-full bg-run" title="This session has a running turn" />
+          )}
+          session {sessionId || "…"}
+        </span>
+        {showHeaderStop && (
+          <button
+            onClick={() => stopTurn()}
+            disabled={stopping}
+            className="rounded-full border border-fail/50 px-2.5 py-0.5 text-[11px] font-semibold text-fail hover:bg-failBg disabled:opacity-50"
+          >
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
+        )}
         <span className="flex-1" />
         <Link href="/library" className="text-xs font-semibold text-content hover:text-green">
           Sessions ({sessionCount})
@@ -182,8 +318,18 @@ export default function Chat({
         {messages.map((m, i) => (
           <MessageBubble key={i} role={m.role} content={m.content} at={m.at} />
         ))}
-        {busy && <ReplyingPill />}
+        {busy && <ReplyingPill onStop={() => stopTurn()} stopping={stopping} />}
       </div>
+
+      {/* Queued (session busy) notice */}
+      {queued && (
+        <QueuedNotice
+          waitedMs={nowMs - queued.since}
+          onStop={() => stopTurn({ ageMs: nowMs - queued.since, rearmQueue: true })}
+          onNewSession={queueToNewSession}
+          stopping={stopping}
+        />
+      )}
 
       {/* Composer */}
       <div className="flex shrink-0 flex-col gap-2.5 border-t border-line px-5 pb-[18px] pt-3.5">
@@ -228,5 +374,46 @@ export default function Chat({
         </div>
       </div>
     </section>
+  );
+}
+
+// The inline notice shown while a message waits for the session to free (item 2). Live timer + two actions.
+function QueuedNotice({
+  waitedMs,
+  onStop,
+  onNewSession,
+  stopping,
+}: {
+  waitedMs: number;
+  onStop: () => void;
+  onNewSession: () => void;
+  stopping: boolean;
+}) {
+  const s = Math.max(0, Math.floor(waitedMs / 1000));
+  const timer = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return (
+    <div className="mx-5 mb-1 rounded-xl border border-run/40 bg-runBg px-3.5 py-3">
+      <div className="flex items-center gap-2 text-sm text-runText">
+        <span className="h-2 w-2 animate-blink rounded-full bg-run" />
+        <span className="flex-1">The agent is still finishing your previous message…</span>
+        <span className="tabular-nums text-xs text-runText/80">waiting {timer}</span>
+      </div>
+      <p className="mt-1 text-xs text-runText/80">Your message is queued and will send automatically the moment the agent is free.</p>
+      <div className="mt-2 flex gap-2">
+        <button
+          onClick={onStop}
+          disabled={stopping}
+          className="rounded-lg border border-fail/50 px-3 py-1.5 text-xs font-semibold text-fail hover:bg-failBg disabled:opacity-50"
+        >
+          {stopping ? "Stopping…" : "Stop the running turn"}
+        </button>
+        <button
+          onClick={onNewSession}
+          className="rounded-lg border border-line2 px-3 py-1.5 text-xs font-semibold text-content hover:bg-surface"
+        >
+          New session
+        </button>
+      </div>
+    </div>
   );
 }

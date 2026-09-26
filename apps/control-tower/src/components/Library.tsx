@@ -7,6 +7,7 @@ import type { PocSummary, TodaySummary } from "@/lib/types";
 import { filterCounts, selectPocs, type LibraryFilter } from "@/lib/aggregate";
 import { fmtClock, fmtDateFull, fmtDuration } from "@/lib/format";
 import { useSessions } from "@/lib/sessions";
+import { useSessionBusy } from "@/lib/useSessionStatus";
 import { Card, CardTitle, StatusPill } from "./ui";
 import { ToastProvider, useToast } from "./Toasts";
 import ThemeToggle from "./ThemeToggle";
@@ -205,7 +206,10 @@ function SessionsCard() {
   const { sessions, activeId, selectSession, renameSession, closeSession } = useSessions();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
+  const [stoppingId, setStoppingId] = useState("");
   const active = sessions.find((s) => s.id === activeId);
+  const toast = useToast();
+  const busy = useSessionBusy(sessions.map((s) => s.id));
 
   const startRename = () => {
     setDraft(active?.name ?? "");
@@ -216,28 +220,59 @@ function SessionsCard() {
     setEditing(false);
   };
 
+  // Stop a busy session's running turn (item 3). This only ever stops the current user's own sessions.
+  const stopSession = async (id: string) => {
+    if (!window.confirm("Stop the running turn on this session?")) return;
+    setStoppingId(id);
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/stop`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) toast.show({ message: data.error || "Couldn’t stop the turn.", tone: "error", detail: data.detail });
+      else toast.show({ message: "Turn cancelled.", tone: "success" });
+    } catch {
+      toast.error("Couldn’t stop the turn.");
+    } finally {
+      setStoppingId("");
+    }
+  };
+
   return (
     <Card className="flex flex-col gap-3 p-[18px]">
       <CardTitle>Sessions</CardTitle>
       <div className="flex flex-col gap-2">
         {sessions.map((s) => {
           const isActive = s.id === activeId;
+          const isBusy = !!busy[s.id];
           return (
-            <button
+            <div
               key={s.id}
-              onClick={() => selectSession(s.id)}
-              className={`flex flex-col gap-0.5 rounded-[10px] px-3 py-2.5 text-left ${
+              className={`flex items-center gap-2 rounded-[10px] px-3 py-2.5 ${
                 isActive ? "border border-line2 bg-elevated" : "border border-line"
               }`}
             >
-              <div className="flex items-center gap-2">
-                {isActive && <span className="h-2 w-2 rounded-full bg-green" />}
-                <span className={`text-[13px] font-semibold ${isActive ? "" : "text-muted"}`}>{s.name}</span>
-              </div>
-              <span className="font-mono text-[11px] text-faint">
-                {s.id} · {s.turns} {s.turns === 1 ? "turn" : "turns"} · {fmtClock(new Date(s.updatedAt).toISOString())}
-              </span>
-            </button>
+              <button onClick={() => selectSession(s.id)} className="flex min-w-0 flex-1 flex-col gap-0.5 text-left">
+                <div className="flex items-center gap-2">
+                  {isBusy ? (
+                    <span className="h-2 w-2 rounded-full bg-run" title="Running a turn" />
+                  ) : isActive ? (
+                    <span className="h-2 w-2 rounded-full bg-green" />
+                  ) : null}
+                  <span className={`truncate text-[13px] font-semibold ${isActive ? "" : "text-muted"}`}>{s.name}</span>
+                </div>
+                <span className="truncate font-mono text-[11px] text-faint">
+                  {s.id} · {s.turns} {s.turns === 1 ? "turn" : "turns"} · {fmtClock(new Date(s.updatedAt).toISOString())}
+                </span>
+              </button>
+              {isBusy && (
+                <button
+                  onClick={() => stopSession(s.id)}
+                  disabled={stoppingId === s.id}
+                  className="shrink-0 rounded-md border border-fail/50 px-2 py-1 text-[11px] font-semibold text-fail hover:bg-failBg disabled:opacity-50"
+                >
+                  {stoppingId === s.id ? "…" : "Stop"}
+                </button>
+              )}
+            </div>
           );
         })}
       </div>

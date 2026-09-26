@@ -11,6 +11,7 @@ interface Toast {
   tone: Tone;
   href?: string;
   linkLabel?: string;
+  detail?: string;
 }
 
 export interface ToastInput {
@@ -19,6 +20,7 @@ export interface ToastInput {
   href?: string; // optional external link (e.g. the deployed App URL)
   linkLabel?: string;
   ttlMs?: number;
+  detail?: string; // short, non-secret disclosure shown behind a "details" toggle (never raw platform JSON)
 }
 
 interface ToastApi {
@@ -66,9 +68,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         tone: input.tone ?? "info",
         href: input.href,
         linkLabel: input.linkLabel,
+        detail: input.detail,
       };
       setToasts((t) => [...t.slice(-3), toast]);
-      setTimeout(() => dismiss(id), input.ttlMs ?? 6000);
+      // Errors with a details disclosure linger a little longer so the user can expand them.
+      setTimeout(() => dismiss(id), input.ttlMs ?? (input.detail ? 9000 : 6000));
     },
     [dismiss],
   );
@@ -94,6 +98,12 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             <ToneIcon tone={t.tone} />
             <div className="min-w-0 flex-1 text-sm text-content">
               <div className="break-words">{t.message}</div>
+              {t.detail && (
+                <details className="mt-1 text-xs text-faint">
+                  <summary className="cursor-pointer select-none hover:text-content">details</summary>
+                  <div className="mt-1 break-words font-mono">{t.detail}</div>
+                </details>
+              )}
               {t.href && (
                 <a
                   href={t.href}

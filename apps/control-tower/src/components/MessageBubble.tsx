@@ -65,18 +65,31 @@ export default function MessageBubble({ role, content, at, recovered }: BubblePr
   );
 }
 
-// The "agent is replying" pill shown while a turn streams.
-export function ReplyingPill() {
+// The "agent is replying" pill shown while a turn streams. When `onStop` is given it carries a Stop button
+// to cancel the in-flight turn (Round 4, item 3).
+export function ReplyingPill({ onStop, stopping }: { onStop?: () => void; stopping?: boolean } = {}) {
   return (
-    <div className="flex items-center gap-1.5 self-start rounded-full border border-line bg-surface px-3 py-2 text-xs text-faint">
-      {[0, 1, 2].map((i) => (
-        <span
-          key={i}
-          className="h-1.5 w-1.5 rounded-full bg-muted animate-blink"
-          style={{ animationDelay: `${i * 0.2}s` }}
-        />
-      ))}
-      agent is replying
+    <div className="flex items-center gap-2 self-start">
+      <div className="flex items-center gap-1.5 rounded-full border border-line bg-surface px-3 py-2 text-xs text-faint">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className="h-1.5 w-1.5 rounded-full bg-muted animate-blink"
+            style={{ animationDelay: `${i * 0.2}s` }}
+          />
+        ))}
+        agent is replying
+      </div>
+      {onStop && (
+        <button
+          onClick={onStop}
+          disabled={stopping}
+          className="flex items-center gap-1.5 rounded-full border border-fail/50 px-3 py-2 text-xs font-semibold text-fail transition-colors hover:bg-failBg disabled:opacity-50"
+        >
+          <span className="h-2 w-2 rounded-[2px] bg-fail" />
+          {stopping ? "Stopping…" : "Stop"}
+        </button>
+      )}
     </div>
   );
 }
