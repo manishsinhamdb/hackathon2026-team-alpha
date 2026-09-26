@@ -104,7 +104,15 @@ export class PlatformClient {
       try {
         return await this.fetchImpl(this.invokeUrl(true), {
           method: "POST",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "text/event-stream" },
+          // The platform threads a multi-turn session by the `X-Session-Id` HEADER, not the body
+          // `session_id` (which it ignores for threading, minting a fresh per-execution session each turn).
+          // This header is what makes turn 2 share turn 1's thread — see docs/09 § Session handling.
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+            "X-Session-Id": args.sessionId,
+          },
           body: payload,
           signal: controller.signal,
         });
@@ -141,7 +149,12 @@ export class PlatformClient {
       try {
         return await this.fetchImpl(this.invokeUrl(), {
           method: "POST",
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          // Same as the streaming path: the session threads on the `X-Session-Id` header, not the body.
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+            "X-Session-Id": args.sessionId,
+          },
           body: payload,
           signal: controller.signal,
         });
