@@ -26,13 +26,19 @@ browser  ──HTTP──►  Next.js server (BFF)  ──►  platform invoke A
   replying, poll". The UI session id is sent as the **`X-Session-Id` header** (this — not the body
   `session_id` — is what threads a multi-turn conversation on the platform), so every turn of a conversation
   shares one chat-agent thread.
-- `GET /api/pocs` — POCs (id, title, status, versions, created_at, updated_at, ui_archived).
+- `GET /api/pocs` — POCs (id, title, ui_label, status, versions, created_at, updated_at, ui_archived).
 - `GET /api/pocs/:id` — the aggregated read model the board polls: poc doc + runs + tasks + active
   cloud_resources + latest deployment (app/api/health URLs, EC2 id, TTL) + test summary + clarification +
   the derived stepper cells, coder rows and run-history rows. **Never writes.**
 - `GET /api/pocs/:id/conversation` — the POC's stored conversation, recovered on load.
-- `POST /api/pocs/:id/archive` — **the only write**: set/unset `pocs.ui_archived` (+ `ui_archived_at`).
+- `POST /api/pocs/:id/archive` — UI write #1: set/unset `pocs.ui_archived` (+ `ui_archived_at`).
   Body `{ archived: boolean }`. Agents ignore the field; it only controls UI visibility.
+- `POST /api/pocs/:id/label` — UI write #2: the POC **nickname**. Body `{ label: string }`, trimmed, ≤ 80
+  chars; sets `pocs.ui_label` (+ `ui_label_at`), an empty label `$unset`s both. Agents ignore it.
+- `GET /api/pocs/:id/artifacts` — the POC's S3 objects under `pocs/{id}/`, grouped by stage (spec, code,
+  deploy, test, input). Without AWS credentials it returns keys derived from the DB with `s3: false`.
+- `GET /api/pocs/:id/artifacts/open?key=…` — a ≤ 5 min presigned GET for **one** key (must start with
+  `pocs/{id}/`, no `..`); `&redirect=1` answers with a 302. `503` when S3 is not configured.
 - `GET /api/summary` — the library "Today" counts (drafted today, deployed & tested today, cloud resources
   live, most recent transcript→tested duration).
 - `POST /api/sessions/:id/stop` — **cancel** the running turn on a chat session (calls the platform
@@ -52,6 +58,14 @@ the reply omits the id (client "new POC during turn" + a DB fallback), with the 
 Pipeline header; and a **searchable combobox** POC selector (type-to-filter on title/id, keyboard nav,
 followed POC pinned).
 
+**Round 5 (UI/BFF):** coder rows match `tasks.component` (legacy agent/mode fallback, newest task wins);
+**abandoned** runs (queued/running with no heartbeat for > 180 s, or failed `ABANDONED`) show amber in the
+stepper, run history, Code run and Pipeline header with a **Retry / Continue** button that sends the retry
+message through the chat; executions / hand-overs shown as `exec N`; an **Artefacts** card (presigned S3
+opens); editable **POC nicknames** (top bar, selector rows, library) and **session names** (Conversation
+headline); and **transition notices** — a system card in the conversation per stage transition with
+next-action buttons, plus one automatic "How's it going?" when the session is free. See docs/09 § Round 5.
+
 The client is **two screens** (the approved v2 dark design in `design/`):
 
 - **Workspace (`/`)** — a top bar (POC selector, New POC, POC library, health chip, **theme toggle**), a
@@ -69,7 +83,7 @@ The client is **two screens** (the approved v2 dark design in `design/`):
   a table sorted by created desc with **Open** and **Archive / Restore**, and a Sessions + Today sidebar.
 
 Chat **sessions are client-side** (`localStorage`, `src/lib/sessions.ts`), shared between both screens;
-conversation history still comes from the DB. The UI is read-only except the archive write above.
+conversation history still comes from the DB. The UI is read-only except the archive + nickname writes above.
 
 ## Environment variables
 
@@ -85,6 +99,9 @@ All server-side. Copy `.env.example` to `.env.local` (gitignored) and fill in th
 | `POC_PLATFORM_DB` | Platform DB name (default `poc_builder`). |
 | `UI_USER_ID` | `user_id` stamped on chat turns (default `u_ui`). |
 | `PORT` | Listen port (default `3100`). |
+| `POC_S3_BUCKET` | Optional. Artefacts bucket (default `msinha-hackathon`). |
+| `AWS_REGION` | Optional. Bucket region (default `ap-south-1`; `AWS_DEFAULT_REGION` also honoured). |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Optional (secret). Read-only S3 credentials for the Artefacts card (`AWS_SESSION_TOKEN` too if temporary). Unset → the card lists DB-derived keys and "open" is disabled. Server-only. |
 
 ### Create the UI service account (once)
 
@@ -132,8 +149,12 @@ rendering under both themes; and the **live helpers** (poc-id auto-follow detect
 the **split** clamp/pointer/keyboard/persist logic; the **combobox** filter/sort/timestamp format; the
 **chat busy** classification + the 409→queue→auto-send retry driver + error mapping; the **runtime-session**
 list/stop calls + the 409-busy invoke result; the **session-status** derivation; the **session→POC**
-resolution; and the **new-POC-during-turn** + auto-follow precedence rules.
-Fake fetch/clock and fixture documents — no network or DB required. `npm test` → 117 tests.
+resolution; and the **new-POC-during-turn** + auto-follow precedence rules. Round 5 adds the
+**abandoned** rule + retry message/label (`runHealth`), `tasks.component` / legacy coder-row matching, the
+**nickname** write (`setLabel` against a fake collection — only `ui_label` / `ui_label_at`) + nickname search,
+the **artefacts** key guard / grouping / DB fallback / presign (fake S3 store), the **transition** detector
++ dedupe + auto-check-in rule, and the abandoned stepper cell.
+Fake fetch/clock and fixture documents — no network, DB or AWS required. `npm test` → 168 tests.
 
 ## Point it at another project / workspace
 

@@ -26,8 +26,13 @@ export default function RunHistory({ rows }: { rows: RunHistoryRow[] }) {
         <div key={r.run_id} className={`${COLS} border-t border-line px-1 py-2 text-[13px]`}>
           <span>{r.stageLabel}</span>
           <CopyId value={r.run_id} display={shortId(r.run_id)} className="text-muted" />
-          <span>
+          <span className="flex items-center gap-1.5">
             <RunStatusPill status={r.display} />
+            {r.executions ? (
+              <span className="text-[11px] text-faint" title="Resumed / handed over to a new execution">
+                exec {r.executions}
+              </span>
+            ) : null}
           </span>
           <span className="text-muted">{fmtDateShort(r.started_at)}</span>
           <span className="text-muted tabular-nums">{fmtDuration(r.duration_ms)}</span>

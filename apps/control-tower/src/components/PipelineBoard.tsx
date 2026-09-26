@@ -5,7 +5,9 @@ import { HelpCircle, RefreshCw } from "lucide-react";
 import type { PocDetail, StageCell } from "@/lib/types";
 import { fmtCountdown, fmtDuration } from "@/lib/format";
 import { pollIntervalMs, IDLE_POLL_MS } from "@/lib/live";
+import { detectTransitions, type Transition } from "@/lib/transitions";
 import { useToast } from "./Toasts";
+import Artifacts from "./Artifacts";
 import { Stepper } from "./Stepper";
 import CodeRun from "./CodeRun";
 import RunHistory from "./RunHistory";
@@ -15,15 +17,21 @@ const UPDATED_FLASH_MS = 1_400;
 const STAGE_FLASH_MS = 2_000;
 
 function isTerminal(status: StageCell["status"]): boolean {
-  return status === "succeeded" || status === "failed";
+  return status === "succeeded" || status === "failed" || status === "abandoned";
 }
 
 export default function PipelineBoard({
   pocId,
   refreshSignal,
+  onTransitions,
+  onRetry,
 }: {
   pocId: string;
   refreshSignal: number;
+  // Round 5: stage transitions between two polls of the selected POC (never on the first poll — baseline).
+  onTransitions?: (transitions: Transition[]) => void;
+  // Round 5: Retry / Continue an abandoned stage (sent through the normal chat send path).
+  onRetry?: (stage: string, runId: string) => void;
 }) {
   const [detail, setDetail] = useState<PocDetail | null>(null);
   const [error, setError] = useState("");
@@ -37,13 +45,16 @@ export default function PipelineBoard({
   const nextPollAtRef = useRef<number>(0);
   const intervalRef = useRef<number>(IDLE_POLL_MS);
   const prevStagesRef = useRef<Record<string, StageCell["status"]>>({});
+  const prevDetailRef = useRef<PocDetail | null>(null); // the previous poll, for transition notices
+  const onTransitionsRef = useRef(onTransitions);
+  onTransitionsRef.current = onTransitions;
   const updatedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toast = useToast();
 
   // Compare the freshly-fetched stages to the previous poll: any stage that just reached a terminal state
   // flashes its node, and a freshly-succeeded deploy surfaces the App link in a toast.
-  const detectTransitions = useCallback(
+  const flashTransitions = useCallback(
     (data: PocDetail) => {
       const prev = prevStagesRef.current;
       const flashed: string[] = [];
@@ -84,7 +95,11 @@ export default function PipelineBoard({
       if (pocRef.current !== id) return; // selection changed mid-flight
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       const detailData = data as PocDetail;
-      detectTransitions(detailData);
+      flashTransitions(detailData);
+      // Transition notices: compare to the previous poll (null right after load / POC switch = baseline).
+      const transitions = detectTransitions(prevDetailRef.current, detailData);
+      prevDetailRef.current = detailData;
+      if (transitions.length) onTransitionsRef.current?.(transitions);
       setDetail(detailData);
       setError("");
       // Adapt the cadence from the fresh data and schedule the next poll.
@@ -104,13 +119,14 @@ export default function PipelineBoard({
       nextPollAtRef.current = Date.now() + IDLE_POLL_MS;
       toast.error(`Pipeline update failed: ${msg}`);
     }
-  }, [toast, detectTransitions]);
+  }, [toast, flashTransitions]);
 
   // Reset per-POC state and fetch immediately when the selection changes.
   useEffect(() => {
     setDetail(null);
     setError("");
     prevStagesRef.current = {};
+    prevDetailRef.current = null;
     setFlashKeys(new Set());
     load();
   }, [pocId, load]);
@@ -157,6 +173,10 @@ export default function PipelineBoard({
   const runningRun = detail.runs.find(
     (r) => r.status === "running" || r.status === "queued" || r.status === "waiting_user",
   );
+  // An abandoned stage (stale heartbeat / given up) — shown amber in the header with Retry / Continue.
+  const abandonedCell = stages.find((s) => s.status === "abandoned" && s.run_id);
+  const retryCell = (s: StageCell) => s.run_id && onRetry?.(s.key, s.run_id);
+  const runsKey = detail.runs.map((r) => `${r.run_id}:${r.status}`).join(",");
   const active = cloudResources.activeCount;
   const remainingMs = nextPollAtRef.current ? Math.max(0, nextPollAtRef.current - nowMs) : intervalMs;
 
@@ -166,10 +186,27 @@ export default function PipelineBoard({
       <div className="flex h-[52px] shrink-0 items-center gap-3 border-b border-line px-6">
         <div className="font-sora text-sm font-semibold">Pipeline</div>
         <CopyId value={poc.poc_id} className="text-xs" />
-        {runningRun && (
+        {abandonedCell ? (
+          <span className="flex items-center gap-1.5 text-xs text-faint" title="No heartbeat for over 3 minutes">
+            <span className="text-amber">● {abandonedCell.key} abandoned</span>
+            <CopyId value={abandonedCell.run_id!} className="text-xs" />
+            {onRetry && (
+              <button
+                type="button"
+                onClick={() => retryCell(abandonedCell)}
+                className="rounded-full border border-amber/60 px-2.5 py-0.5 text-[11px] font-semibold text-amber hover:bg-amberBg"
+              >
+                {abandonedCell.retry_label ?? "Retry"}
+              </button>
+            )}
+          </span>
+        ) : runningRun && (
           <span className="flex items-center gap-1.5 text-xs text-faint" title={`${runningRun.stage} run in progress`}>
             <span className="text-run">● {runningRun.stage}</span>
             <CopyId value={runningRun.run_id} className="text-xs" />
+            {runningRun.executions && runningRun.executions > 1 ? (
+              <span className="text-dim" title={`${runningRun.handovers} hand-over(s) / resume(s)`}>exec {runningRun.executions}</span>
+            ) : null}
             {runningRun.execution_id && (
               <>
                 <span className="text-dim">exec</span>
@@ -192,7 +229,13 @@ export default function PipelineBoard({
       <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-12 content-start gap-4 overflow-y-auto p-6">
         {/* Stepper */}
         <Card className="col-span-12 p-5">
-          <Stepper stages={stages} nowMs={nowMs} teardownHint={`${active} active`} flashKeys={flashKeys} />
+          <Stepper
+            stages={stages}
+            nowMs={nowMs}
+            teardownHint={`${active} active`}
+            flashKeys={flashKeys}
+            onRetry={onRetry ? retryCell : undefined}
+          />
         </Card>
 
         {/* Clarification (draft finished with questions) */}
@@ -217,7 +260,7 @@ export default function PipelineBoard({
         {/* Code run + right stack */}
         <div className="col-span-12 lg:col-span-7">
           {codeRun && coders.length > 0 ? (
-            <CodeRun run={codeRun} coders={coders} />
+            <CodeRun run={codeRun} coders={coders} onRetry={onRetry ? (r) => onRetry(r.stage, r.run_id) : undefined} />
           ) : (
             <Card className="flex flex-col gap-2 p-5">
               <CardTitle>Code run</CardTitle>
@@ -294,6 +337,11 @@ export default function PipelineBoard({
         {/* Run history */}
         <div className="col-span-12">
           <RunHistory rows={runHistory} />
+        </div>
+
+        {/* Artefacts (S3 keys per stage, open via a short-lived presigned URL) */}
+        <div className="col-span-12">
+          <Artifacts pocId={poc.poc_id} refreshKey={runsKey} />
         </div>
 
         {/* Test report (when present) */}

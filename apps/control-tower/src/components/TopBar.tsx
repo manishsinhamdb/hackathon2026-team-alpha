@@ -5,7 +5,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Droplet, Library, Plus, Search, Star, User } from "lucide-react";
 import type { PocSummary } from "@/lib/types";
 import { fmtSelectorTime, selectorRows, specLabel } from "@/lib/selector";
+import { displayTitle, subTitle } from "@/lib/label";
 import { HealthChip, StatusPill } from "./ui";
+import { EditButton, InlineEdit } from "./LabelEdit";
 import ThemeToggle from "./ThemeToggle";
 
 // The product mark: a green rounded square with a droplet glyph (the design's leaf/drop mark).
@@ -31,6 +33,7 @@ export default function TopBar({
   connection,
   project,
   followedId,
+  onRename,
 }: {
   pocs: PocSummary[];
   selected: string;
@@ -39,6 +42,7 @@ export default function TopBar({
   connection: "ok" | "error" | "loading";
   project: string;
   followedId?: string;
+  onRename?: (pocId: string, label: string) => void; // set / clear the POC nickname (Round 5)
 }) {
   const current = pocs.find((p) => p.poc_id === selected);
   const [open, setOpen] = useState(false);
@@ -47,6 +51,8 @@ export default function TopBar({
   const ref = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listId = "poc-selector-listbox";
+  // Which POC's nickname is being edited inline: the closed control ("closed") or a listbox row (poc id).
+  const [editing, setEditing] = useState<string>("");
 
   const rows = useMemo(() => selectorRows(pocs, query, followedId), [pocs, query, followedId]);
   // The navigable items are the filtered rows plus a trailing "New POC" affordance (index === rows.length).
@@ -117,6 +123,7 @@ export default function TopBar({
             open ? "border-green" : "border-line"
           }`}
           onClick={() => {
+            if (editing === "closed") return;
             if (!open) openList();
             inputRef.current?.focus();
           }}
@@ -125,6 +132,17 @@ export default function TopBar({
             className={`h-2 w-2 shrink-0 rounded-full ${connection === "error" ? "bg-fail" : connection === "loading" ? "bg-faint" : "bg-run"}`}
           />
           {open ? <Search className="h-4 w-4 shrink-0 text-faint" /> : null}
+          {!open && current && editing === "closed" ? (
+            <InlineEdit
+              value={current.ui_label ?? ""}
+              placeholder={current.title}
+              ariaLabel="POC nickname"
+              onSave={(v) => onRename?.(current.poc_id, v)}
+              onDone={() => setEditing("")}
+              className="flex-1 text-sm font-semibold"
+            />
+          ) : (
+          <span className="flex min-w-0 flex-1 flex-col justify-center">
           <input
             ref={inputRef}
             role="combobox"
@@ -133,8 +151,8 @@ export default function TopBar({
             aria-autocomplete="list"
             aria-activedescendant={open ? `poc-opt-${activeIndex}` : undefined}
             aria-label="Search and select a POC"
-            value={open ? query : current ? current.title : ""}
-            placeholder={open ? "Search title or POC id…" : "Select a POC…"}
+            value={open ? query : current ? displayTitle(current) : ""}
+            placeholder={open ? "Search title, nickname or POC id…" : "Select a POC…"}
             onChange={(e) => {
               setQuery(e.target.value);
               setOpen(true);
@@ -142,8 +160,17 @@ export default function TopBar({
             }}
             onFocus={() => !open && openList()}
             onKeyDown={onKeyDown}
-            className="min-w-0 flex-1 truncate bg-transparent font-semibold text-content outline-none placeholder:font-normal placeholder:text-faint"
+            className="min-w-0 flex-1 truncate bg-transparent font-semibold leading-tight text-content outline-none placeholder:font-normal placeholder:text-faint"
           />
+          {/* The agent's title beneath a nickname (small, muted). */}
+          {!open && current && subTitle(current) && (
+            <span className="truncate text-[10px] leading-tight text-faint">{subTitle(current)}</span>
+          )}
+          </span>
+          )}
+          {!open && current && onRename && editing !== "closed" && (
+            <EditButton label="Rename POC (nickname)" onClick={() => setEditing("closed")} />
+          )}
           {/* Closed control: show the selected POC's spec / status / created timestamp. */}
           {!open && current && (
             <>
@@ -185,9 +212,24 @@ export default function TopBar({
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
                       {isFollowed && <Star className="h-3 w-3 shrink-0 text-green" fill="currentColor" strokeWidth={0} />}
-                      <span className="truncate text-sm font-medium">{p.title}</span>
+                      {editing === p.poc_id ? (
+                        <InlineEdit
+                          value={p.ui_label ?? ""}
+                          placeholder={p.title}
+                          ariaLabel="POC nickname"
+                          onSave={(v) => onRename?.(p.poc_id, v)}
+                          onDone={() => setEditing("")}
+                          className="flex-1 text-sm"
+                        />
+                      ) : (
+                        <span className="truncate text-sm font-medium">{displayTitle(p)}</span>
+                      )}
                       {isFollowed && <span className="shrink-0 text-[10px] uppercase tracking-wide text-green">following</span>}
+                      {onRename && editing !== p.poc_id && (
+                        <EditButton label="Rename POC (nickname)" onClick={() => setEditing(p.poc_id)} className="opacity-60 hover:opacity-100" />
+                      )}
                     </span>
+                    {subTitle(p) && <span className="block truncate text-[11px] text-faint">{subTitle(p)}</span>}
                     <span className="block truncate font-mono text-[11px] text-faint">{p.poc_id}</span>
                   </span>
                   {specLabel(p) && <span className="shrink-0 font-mono text-[11px] text-faint">{specLabel(p)}</span>}

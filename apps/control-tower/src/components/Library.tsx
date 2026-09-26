@@ -5,7 +5,9 @@ import Link from "next/link";
 import { ArchiveRestore, Archive, Droplet, Plus, Search } from "lucide-react";
 import type { PocSummary, TodaySummary } from "@/lib/types";
 import { filterCounts, selectPocs, type LibraryFilter } from "@/lib/aggregate";
-import { fmtClock, fmtDateFull, fmtDuration } from "@/lib/format";
+import { fmtClock, fmtDateFull } from "@/lib/format";
+import { displayTitle, saveLabel, subTitle, withLabel } from "@/lib/label";
+import { EditButton, InlineEdit } from "./LabelEdit";
 import { useSessions } from "@/lib/sessions";
 import { useSessionBusy } from "@/lib/useSessionStatus";
 import { Card, CardTitle, StatusPill } from "./ui";
@@ -37,6 +39,7 @@ function LibraryInner() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<LibraryFilter>("active");
   const [busyId, setBusyId] = useState("");
+  const [editingId, setEditingId] = useState("");
   const toast = useToast();
 
   const load = useCallback(async () => {
@@ -93,6 +96,18 @@ function LibraryInner() {
     }
   };
 
+  // Set / clear the POC nickname (Round 5): optimistic, then confirm with the server + reload.
+  const rename = async (poc: PocSummary, label: string) => {
+    setPocs((cur) => withLabel(cur, poc.poc_id, label));
+    try {
+      await saveLabel(fetch, poc.poc_id, label);
+      await load();
+    } catch (err) {
+      toast.error(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);
+      await load();
+    }
+  };
+
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       {/* Top bar */}
@@ -127,7 +142,7 @@ function LibraryInner() {
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search title or POC id"
+                placeholder="Search title, nickname or POC id"
                 aria-label="Search POCs"
                 className="flex-1 bg-transparent text-[13px] text-content outline-none placeholder:text-faint"
               />
@@ -158,8 +173,25 @@ function LibraryInner() {
             {rows.length === 0 && <div className="px-[18px] py-6 text-sm text-faint">No POCs match.</div>}
             {rows.map((p) => (
               <div key={p.poc_id} className="grid grid-cols-12 items-center gap-3 border-b border-line px-[18px] py-3.5 last:border-0">
-                <div className="col-span-5 flex flex-col gap-0.5">
-                  <div className={`truncate font-semibold ${p.ui_archived ? "text-muted" : ""}`}>{p.title}</div>
+                <div className="col-span-5 flex min-w-0 flex-col gap-0.5">
+                  <div className="group flex min-w-0 items-center gap-1">
+                    {editingId === p.poc_id ? (
+                      <InlineEdit
+                        value={p.ui_label ?? ""}
+                        placeholder={p.title}
+                        ariaLabel="POC nickname"
+                        onSave={(v) => rename(p, v)}
+                        onDone={() => setEditingId("")}
+                        className="flex-1 text-sm font-semibold"
+                      />
+                    ) : (
+                      <>
+                        <div className={`truncate font-semibold ${p.ui_archived ? "text-muted" : ""}`}>{displayTitle(p)}</div>
+                        <EditButton label="Rename POC (nickname)" onClick={() => setEditingId(p.poc_id)} className="opacity-0 group-hover:opacity-100 focus:opacity-100" />
+                      </>
+                    )}
+                  </div>
+                  {subTitle(p) && <div className="truncate text-xs text-faint">{subTitle(p)}</div>}
                   <div className="truncate font-mono text-xs text-faint">{p.poc_id}</div>
                 </div>
                 <div className="col-span-2">

@@ -34,14 +34,38 @@ function durationText(r: CoderRowView): string {
   return fmtDuration(r.duration_ms);
 }
 
-export default function CodeRun({ run, coders }: { run: RunView; coders: CoderRowView[] }) {
-  const display = run.status === "succeeded" ? "succeeded" : run.status === "failed" ? "failed" : "running";
+export default function CodeRun({
+  run,
+  coders,
+  onRetry,
+}: {
+  run: RunView;
+  coders: CoderRowView[];
+  onRetry?: (run: RunView) => void; // abandoned: Retry / Continue via the chat send path
+}) {
+  const display = run.abandoned
+    ? "abandoned"
+    : run.status === "succeeded" ? "succeeded" : run.status === "failed" ? "failed" : "running";
   return (
     <Card className="flex flex-col gap-3.5 p-5">
       <div className="flex items-center gap-2.5">
         <CardTitle>Code run</CardTitle>
         <CopyId value={run.run_id} display={shortId(run.run_id)} className="text-xs" />
+        {run.executions && run.executions > 1 ? (
+          <span className="text-[11px] text-faint" title={`${run.handovers} hand-over(s) / resume(s)`}>
+            exec {run.executions}
+          </span>
+        ) : null}
         <span className="flex-1" />
+        {run.abandoned && onRetry && (
+          <button
+            type="button"
+            onClick={() => onRetry(run)}
+            className="rounded-full border border-amber/60 px-2.5 py-0.5 text-[11px] font-semibold text-amber hover:bg-amberBg"
+          >
+            {run.has_progress ? "Continue" : "Retry"}
+          </button>
+        )}
         <RunStatusPill status={display} />
       </div>
 

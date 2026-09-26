@@ -7,13 +7,32 @@ import type { ConversationMessage } from "@/lib/types";
 import { pocIdIn } from "@/lib/live";
 import { postChat, type ChatOutcome } from "@/lib/chat";
 import { useSessionBusy } from "@/lib/useSessionStatus";
+import type { NoticeAction, Transition } from "@/lib/transitions";
 import { useToast } from "./Toasts";
 import MessageBubble, { ReplyingPill } from "./MessageBubble";
+import SystemNotice from "./SystemNotice";
+import { EditButton, InlineEdit } from "./LabelEdit";
 
 interface LiveMessage {
-  role: "user" | "assistant" | "system";
+  role: "user" | "assistant" | "system" | "notice";
   content: string;
   at: number;
+  notice?: Transition; // role "notice": a pipeline transition card posted by the tower (Round 5)
+}
+
+// What the workspace can do with the chat pane (Round 5): send through the normal path (Retry / Continue,
+// the auto check-in), post a transition card, and ask whether the session is free.
+export interface ChatApi {
+  // Returns false (and sends nothing) when a turn is already in flight or queued.
+  send: (message: string, opts?: { display?: string; auto?: boolean }) => boolean;
+  postNotice: (notice: Transition) => void;
+  sessionState: () => { inFlight: boolean; queued: boolean };
+}
+
+// Canned actions operate on a POC: the chat agent resolves the POC from natural language, so the poc_id is
+// appended to the message (the transcript still shows the friendly label).
+export function scopeToPoc(message: string, pocId?: string): string {
+  return pocId ? `${message}\n\n(This is about POC ${pocId}.)` : message;
 }
 
 // A message waiting for the session to free (after a 409 SESSION_BUSY), plus when it was queued (for the
@@ -45,6 +64,9 @@ export default function Chat({
   onSent,
   onNewSession,
   onPocDetected,
+  sessionName,
+  onRenameSession,
+  apiRef,
 }: {
   sessionId: string;
   sessionCount: number;
@@ -52,6 +74,9 @@ export default function Chat({
   onSent: () => void;
   onNewSession: () => void;
   onPocDetected?: (pocId: string) => void;
+  sessionName?: string;
+  onRenameSession?: (name: string) => void;
+  apiRef?: React.MutableRefObject<ChatApi | null>;
 }) {
   const [messages, setMessages] = useState<LiveMessage[]>([]);
   const [recovered, setRecovered] = useState<ConversationMessage[]>([]);
@@ -62,6 +87,7 @@ export default function Chat({
   const [stopping, setStopping] = useState(false);
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [editingName, setEditingName] = useState(false);
   const logRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -95,8 +121,10 @@ export default function Chat({
     [toast],
   );
 
+  // `auto` marks the tower's own check-in ("How's it going?" after a transition): if the platform says the
+  // session is busy it is DROPPED rather than queued, so it can never stack a second message.
   const send = useCallback(
-    async (text: string, display?: string) => {
+    async (text: string, display?: string, auto?: boolean) => {
       const message = text.trim();
       if (!message || !sessionId || busy || queued) return;
       setMessages((m) => [...m, { role: "user", content: (display ?? text).trim(), at: Date.now() }]);
@@ -108,7 +136,9 @@ export default function Chat({
       if (sendGuardRef.current !== guard) return; // this turn was stopped/superseded — ignore its result
       setBusy(false);
       setTurnStartedAt(null);
-      if (outcome.kind === "busy") {
+      if (outcome.kind === "busy" && auto) {
+        setMessages((m) => [...m, { role: "system", content: "The agent is busy — skipped the automatic check-in.", at: Date.now() }]);
+      } else if (outcome.kind === "busy") {
         setQueued({ message, display, since: Date.now() }); // starts the retry loop (effect below)
       } else if (outcome.kind === "error") {
         pushError(outcome);
@@ -241,8 +271,16 @@ export default function Chat({
   // we append the poc_id to the message. The transcript still shows the friendly label. Free-typed messages
   // are sent verbatim (they may be a transcript that starts a NEW POC, where scoping would be wrong).
   const sendAction = (label: string, message: string) => {
-    const scoped = pocId ? `${message}\n\n(This is about POC ${pocId}.)` : message;
-    send(scoped, label);
+    send(scopeToPoc(message, pocId), label);
+  };
+
+  // A transition card's buttons: canned sends (scoped to the notice's POC), focus the composer, or a link.
+  const onNoticeAction = (a: NoticeAction, notice: Transition) => {
+    if (a.kind === "focus") {
+      taRef.current?.focus();
+    } else if (a.kind === "send") {
+      send(a.scoped ? scopeToPoc(a.message, notice.poc_id) : a.message, a.label);
+    }
   };
 
   const onPickFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -262,6 +300,21 @@ export default function Chat({
   };
 
   const canSend = !!sessionId && !busy && !queued && !stopping;
+
+  // Expose the pane's send path to the workspace (Retry / Continue, transition notices, auto check-in).
+  // Re-assigned every render so it always sees the current busy/queued state.
+  if (apiRef) {
+    apiRef.current = {
+      send: (message, opts) => {
+        if (!canSend) return false;
+        void send(message, opts?.display, opts?.auto);
+        return true;
+      },
+      postNotice: (notice) =>
+        setMessages((m) => [...m, { role: "notice", content: notice.title, at: Date.now(), notice }]),
+      sessionState: () => ({ inFlight: busy || stopping || !sessionId, queued: !!queued }),
+    };
+  }
   // A running turn we can stop: our own in-flight turn, or a turn the status poll sees on this session.
   const showHeaderStop = (sessionBusy || busy) && !queued;
 
@@ -269,8 +322,28 @@ export default function Chat({
     <section className="flex h-full min-h-0 flex-col border-r border-line bg-ink">
       {/* Header */}
       <div className="flex h-[52px] shrink-0 items-center gap-3 border-b border-line px-5">
-        <div className="font-sora text-sm font-semibold">Conversation</div>
-        <span className="flex items-center gap-1.5 font-mono text-xs text-faint">
+        {/* Headline: the session name (inline-editable, stored client-side with the sessions list). */}
+        <div className="flex min-w-0 items-center gap-1">
+          {editingName && onRenameSession ? (
+            <InlineEdit
+              value={sessionName ?? ""}
+              placeholder="Session name"
+              ariaLabel="Session name"
+              maxLength={60}
+              onSave={(v) => v && onRenameSession(v)}
+              onDone={() => setEditingName(false)}
+              className="w-44 font-sora text-sm font-semibold"
+            />
+          ) : (
+            <>
+              <div className="truncate font-sora text-sm font-semibold" title="Conversation">
+                {sessionName || "Conversation"}
+              </div>
+              {onRenameSession && <EditButton label="Rename session" onClick={() => setEditingName(true)} />}
+            </>
+          )}
+        </div>
+        <span className="flex min-w-0 items-center gap-1.5 truncate font-mono text-xs text-faint">
           {(sessionBusy || busy) && (
             <span className="h-2 w-2 rounded-full bg-run" title="This session has a running turn" />
           )}
@@ -315,9 +388,13 @@ export default function Chat({
           </div>
         )}
 
-        {messages.map((m, i) => (
-          <MessageBubble key={i} role={m.role} content={m.content} at={m.at} />
-        ))}
+        {messages.map((m, i) =>
+          m.role === "notice" && m.notice ? (
+            <SystemNotice key={i} notice={m.notice} at={m.at} disabled={!canSend} onAction={onNoticeAction} />
+          ) : m.role !== "notice" ? (
+            <MessageBubble key={i} role={m.role} content={m.content} at={m.at} />
+          ) : null,
+        )}
         {busy && <ReplyingPill onStop={() => stopTurn()} stopping={stopping} />}
       </div>
 

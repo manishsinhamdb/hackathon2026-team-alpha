@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, X } from "lucide-react";
+import { Check, Pause, X } from "lucide-react";
 import type { StageCell } from "@/lib/types";
 import { fmtClock, fmtDuration, initials } from "@/lib/format";
 
@@ -30,18 +30,21 @@ export function StageStep({
   isLast,
   teardownHint,
   flash,
+  onRetry,
 }: {
   stage: StageCell;
   nowMs: number;
   isLast: boolean;
   teardownHint?: string;
   flash?: boolean;
+  onRetry?: (stage: StageCell) => void; // abandoned cells: Retry / Continue via the chat send path
 }) {
   const s = stage;
   const isGate = s.kind === "gate";
   const running = s.status === "running" || s.status === "waiting_user";
   const done = s.status === "succeeded";
   const failed = s.status === "failed";
+  const abandoned = s.status === "abandoned"; // stale heartbeat / given up (Round 5) — amber
   const notStarted = s.status === "not_started" || s.status === "cancelled";
 
   // A node that just reached a terminal state flashes briefly (feature 4).
@@ -63,13 +66,19 @@ export function StageStep({
         <X className="h-3.5 w-3.5 text-failBg" strokeWidth={3} />
       </span>
     );
+  } else if (abandoned) {
+    circle = (
+      <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 border-amber bg-amberBg box-border ${flashCls}`}>
+        <Pause className="h-3 w-3 text-amber" strokeWidth={3} />
+      </span>
+    );
   } else {
     // not started: dashed ring for a gate, solid ring for a run
     circle = <span className={`h-7 w-7 shrink-0 rounded-full border-2 box-border border-line2 ${isGate ? "border-dashed" : ""}`} />;
   }
 
   // Label + detail colours
-  const labelClass = running ? "text-runText" : done || failed ? "text-content" : "text-faint";
+  const labelClass = running ? "text-runText" : abandoned ? "text-amber" : done || failed ? "text-content" : "text-faint";
 
   let detail: React.ReactNode;
   if (isGate) {
@@ -88,7 +97,30 @@ export function StageStep({
       </span>
     );
   } else if (running) {
-    detail = <span className="text-runText tabular-nums">running · {fmtDuration(stageDurationMs(s, nowMs))}</span>;
+    detail = (
+      <span className="text-runText tabular-nums">
+        running · {fmtDuration(stageDurationMs(s, nowMs))}
+        {s.executions ? <span className="text-faint" title="Resumed / handed over to a new execution"> · exec {s.executions}</span> : null}
+      </span>
+    );
+  } else if (abandoned) {
+    const since = s.last_beat_at ? nowMs - Date.parse(s.last_beat_at) : null;
+    detail = (
+      <span className="flex flex-col items-start gap-1.5">
+        <span className="text-amber tabular-nums" title="No heartbeat for over 3 minutes">
+          abandoned{since != null && since > 0 ? ` · ${fmtDuration(since)} stale` : ""}
+        </span>
+        {onRetry && s.run_id && (
+          <button
+            type="button"
+            onClick={() => onRetry(s)}
+            className="rounded-full border border-amber/60 px-2.5 py-0.5 text-[11px] font-semibold text-amber hover:bg-amberBg"
+          >
+            {s.retry_label ?? "Retry"}
+          </button>
+        )}
+      </span>
+    );
   } else if (failed) {
     detail = <span className="text-fail">{s.error?.code ? `failed · ${s.error.code}` : "failed"}</span>;
   } else {
@@ -116,11 +148,13 @@ export function Stepper({
   nowMs,
   teardownHint,
   flashKeys,
+  onRetry,
 }: {
   stages: StageCell[];
   nowMs: number;
   teardownHint?: string;
   flashKeys?: Set<string>;
+  onRetry?: (stage: StageCell) => void;
 }) {
   return (
     <div className="flex items-start">
@@ -132,6 +166,7 @@ export function Stepper({
           isLast={i === stages.length - 1}
           teardownHint={teardownHint}
           flash={flashKeys?.has(s.key)}
+          onRetry={onRetry}
         />
       ))}
     </div>

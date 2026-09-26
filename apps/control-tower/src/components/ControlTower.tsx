@@ -4,7 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PocSummary } from "@/lib/types";
 import { useSessions } from "@/lib/sessions";
 import { chooseAutoFollow, newPocIds } from "@/lib/live";
-import Chat from "./Chat";
+import { displayTitle, saveLabel, withLabel } from "@/lib/label";
+import { retryMessage } from "@/lib/runHealth";
+import { CANNED, claimUnseen, shouldAutoCheckIn, type Transition } from "@/lib/transitions";
+import Chat, { scopeToPoc, type ChatApi } from "./Chat";
 import PipelineBoard from "./PipelineBoard";
 import SplitPane from "./SplitPane";
 import TopBar from "./TopBar";
@@ -20,7 +23,8 @@ function ControlTowerInner() {
   const [loaded, setLoaded] = useState(false);
   // Bumped after a chat turn completes so the board fetches immediately instead of waiting for the next tick.
   const [refreshSignal, setRefreshSignal] = useState(0);
-  const { sessions, activeId, newSession, recordTurn } = useSessions();
+  const { sessions, activeId, newSession, recordTurn, renameSession } = useSessions();
+  const chatApi = useRef<ChatApi | null>(null); // the Conversation pane's send path (Round 5)
   const toast = useToast();
   const pocsRef = useRef<PocSummary[]>([]);
   const pocIdsRef = useRef<string[]>([]); // ids from the last load, for new-POC-during-turn detection (item 4)
@@ -54,7 +58,8 @@ function ControlTowerInner() {
       if (!pick || followedRef.current === pick) return;
       followedRef.current = pick;
       setSelected(pick);
-      const title = pocsRef.current.find((p) => p.poc_id === pick)?.title;
+      const found = pocsRef.current.find((p) => p.poc_id === pick);
+      const title = found ? displayTitle(found) : undefined;
       toast.show({ message: `Following ${pick}${title ? ` — ${title}` : ""}`, tone: "success" });
     },
     [toast],
@@ -135,6 +140,45 @@ function ControlTowerInner() {
   // precedence rule.
   const onPocDetected = useCallback((pocId: string) => tryAutoFollow(pocId), [tryAutoFollow]);
 
+  // Set / clear a POC nickname (Round 5): optimistic, then confirm with the server + reload.
+  const onRename = useCallback(
+    async (pocId: string, label: string) => {
+      setPocs((cur) => withLabel(cur, pocId, label));
+      try {
+        await saveLabel(fetch, pocId, label);
+      } catch (err) {
+        toast.error(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      await loadPocs();
+    },
+    [loadPocs, toast],
+  );
+
+  // Retry / Continue an abandoned stage: the exact message the chat agent understands, through the normal
+  // send path (so the 409 busy queue still applies). A turn already in flight -> tell the user, send nothing.
+  const onRetry = useCallback(
+    (stage: string, runId: string) => {
+      if (!selectedRef.current) return;
+      const ok = chatApi.current?.send(retryMessage(stage, selectedRef.current, runId));
+      if (!ok) toast.show({ message: "The agent is still working on a message — try again when it finishes.", tone: "error" });
+    },
+    [toast],
+  );
+
+  // Transition notices: dedupe per (poc, run, transition) against the persisted seen-set, post a system card
+  // for each fresh one, then — only if the session is free — auto-send ONE "How's it going?" so the agent
+  // narrates and asks for approval. Busy -> skip (never queue a second message).
+  const onTransitions = useCallback((transitions: Transition[]) => {
+    const store = typeof window !== "undefined" ? window.localStorage : null;
+    const fresh = claimUnseen(transitions, store);
+    const api = chatApi.current;
+    if (!api || !fresh.length) return;
+    for (const t of fresh) api.postNotice(t);
+    if (shouldAutoCheckIn(fresh, api.sessionState())) {
+      api.send(scopeToPoc(CANNED.status, fresh[0].poc_id), { display: CANNED.status, auto: true });
+    }
+  }, []);
+
   const connection: "ok" | "error" | "loading" = listError ? "error" : loaded ? "ok" : "loading";
 
   return (
@@ -147,6 +191,7 @@ function ControlTowerInner() {
         connection={connection}
         project={PROJECT}
         followedId={followedRef.current}
+        onRename={onRename}
       />
 
       {/* Chat | Pipeline with a draggable split (5/7 default); stacked below lg (handle hidden). */}
@@ -161,9 +206,14 @@ function ControlTowerInner() {
             onSent={onSent}
             onNewSession={newSession}
             onPocDetected={onPocDetected}
+            sessionName={sessions.find((s) => s.id === activeId)?.name}
+            onRenameSession={(name) => activeId && renameSession(activeId, name)}
+            apiRef={chatApi}
           />
         }
-        right={<PipelineBoard pocId={selected} refreshSignal={refreshSignal} />}
+        right={
+          <PipelineBoard pocId={selected} refreshSignal={refreshSignal} onTransitions={onTransitions} onRetry={onRetry} />
+        }
       />
     </div>
   );

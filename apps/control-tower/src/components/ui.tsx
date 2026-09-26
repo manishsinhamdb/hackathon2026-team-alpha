@@ -37,6 +37,7 @@ const RUN_TONE: Record<RunDisplayStatus, Tone> = {
   cancelled: "grey",
   queued: "grey",
   waiting_user: "amber",
+  abandoned: "amber", // stale heartbeat / given up (Round 5)
 };
 
 function pillText(s: string): string {
