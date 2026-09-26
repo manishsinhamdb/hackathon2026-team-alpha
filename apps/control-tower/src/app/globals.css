@@ -3,10 +3,68 @@
 @tailwind utilities;
 
 /*
-  Control Tower v2 — the approved dark design. A single dark theme (no light round). Fonts come from
-  Google Fonts (<link> in layout.tsx): Sora, IBM Plex Sans, IBM Plex Mono. All colours are the mockup's
-  literal hex; the semantic names live in tailwind.config.ts.
+  Control Tower v2 — themeable via a `data-theme` attribute on <html>.
+  Every colour is a CSS variable holding space-separated RGB channels so Tailwind's `rgb(var(--x) /
+  <alpha>)` colours and their opacity modifiers work (see tailwind.config.ts). Dark = the approved v2
+  palette; light = the MongoDB house palette. Fonts come from Google Fonts (<link> in layout.tsx):
+  Sora, IBM Plex Sans, IBM Plex Mono. No component holds a literal hex — flipping the theme flips the
+  variables below.
 */
+
+:root,
+[data-theme="dark"] {
+  --ink: 0 30 43;          /* #001E2B  app background */
+  --surface: 17 39 51;     /* #112733  cards / raised panels */
+  --panel: 6 35 47;        /* #06232F  pipeline column */
+  --elevated: 22 48 61;    /* #16303D  selected row / active session */
+  --line: 28 45 56;        /* #1C2D38  hairline borders */
+  --line2: 61 79 88;       /* #3D4F58  stronger borders */
+  --content: 232 237 235;  /* #E8EDEB  primary text */
+  --muted: 184 196 194;    /* #B8C4C2  secondary text */
+  --faint: 136 147 151;    /* #889397  tertiary / captions */
+  --dim: 92 108 117;       /* #5C6C75  quietest hint */
+  --green: 0 237 100;      /* #00ED64  accent */
+  --green-ink: 0 30 43;    /* #001E2B  text on green */
+  --green-dark: 0 104 74;  /* #00684A  user chat bubble */
+  --on-green-dark: 255 255 255; /* #FFFFFF text on the user bubble */
+  --run: 4 152 236;        /* #0498EC  running */
+  --run-text: 195 231 254; /* #C3E7FE */
+  --run-bg: 12 59 91;      /* #0C3B5B */
+  --amber: 255 221 73;     /* #FFDD49  questions */
+  --amber-bg: 59 42 11;    /* #3B2A0B */
+  --fail: 255 159 151;     /* #FF9F97  failed */
+  --fail-bg: 61 21 18;     /* #3D1512 */
+  --success: 113 246 186;  /* #71F6BA  succeeded / healthy */
+  --success-bg: 2 52 48;   /* #023430 */
+  --md-strong: 255 255 255;/* #FFFFFF  bold text inside markdown */
+}
+
+[data-theme="light"] {
+  --ink: 249 251 250;      /* #F9FBFA  app background */
+  --surface: 255 255 255;  /* #FFFFFF  cards / raised panels */
+  --panel: 241 245 244;    /* #F1F5F4  pipeline column */
+  --elevated: 232 237 235; /* #E8EDEB  selected row / active session */
+  --line: 232 237 235;     /* #E8EDEB  hairline borders */
+  --line2: 193 199 198;    /* #C1C7C6  stronger borders */
+  --content: 0 30 43;      /* #001E2B  ink text */
+  --muted: 61 79 88;       /* #3D4F58  secondary text */
+  --faint: 92 108 117;     /* #5C6C75  tertiary / captions */
+  --dim: 136 147 151;      /* #889397  quietest hint */
+  --green: 0 237 100;      /* #00ED64  accent */
+  --green-ink: 0 30 43;    /* #001E2B  text on green */
+  --green-dark: 0 104 74;  /* #00684A  user chat bubble */
+  --on-green-dark: 255 255 255; /* #FFFFFF text on the user bubble */
+  --run: 1 107 248;        /* #016BF8  running */
+  --run-text: 1 107 248;   /* #016BF8  running text on run-bg */
+  --run-bg: 225 247 255;   /* #E1F7FF */
+  --amber: 148 79 1;       /* #944F01  questions */
+  --amber-bg: 254 247 219; /* #FEF7DB */
+  --fail: 219 48 48;       /* #DB3030  failed */
+  --fail-bg: 255 234 229;  /* #FFEAE5 */
+  --success: 0 104 74;     /* #00684A  succeeded / healthy */
+  --success-bg: 227 252 247;/* #E3FCF7 */
+  --md-strong: 0 30 43;    /* #001E2B  bold text inside markdown */
+}
 
 * { box-sizing: border-box; }
 
@@ -14,8 +72,8 @@ html, body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: #001E2B;
-  color: #E8EDEB;
+  background: rgb(var(--ink));
+  color: rgb(var(--content));
   font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
   font-size: 14px;
   line-height: 1.45;
@@ -23,12 +81,12 @@ html, body {
 }
 
 /* Thin, quiet scrollbars that suit the dense board. */
-* { scrollbar-width: thin; scrollbar-color: #1C2D38 transparent; }
+* { scrollbar-width: thin; scrollbar-color: rgb(var(--line2)) transparent; }
 *::-webkit-scrollbar { width: 8px; height: 8px; }
-*::-webkit-scrollbar-thumb { background: #1C2D38; border-radius: 8px; }
+*::-webkit-scrollbar-thumb { background: rgb(var(--line2)); border-radius: 8px; }
 
 /* --- Rendered markdown inside agent chat bubbles --------------------------------------------------- */
-.md { font-size: 13px; line-height: 1.6; color: #E8EDEB; }
+.md { font-size: 13px; line-height: 1.6; color: rgb(var(--content)); }
 .md > *:first-child { margin-top: 0; }
 .md > *:last-child { margin-bottom: 0; }
 .md p { margin: 0.5em 0; }
@@ -40,19 +98,19 @@ html, body {
 .md ul { list-style: disc; }
 .md ol { list-style: decimal; }
 .md li { margin: 0.15em 0; }
-.md a { color: #71F6BA; text-decoration: underline; text-underline-offset: 2px; }
-.md strong { color: #FFFFFF; font-weight: 600; }
+.md a { color: rgb(var(--success)); text-decoration: underline; text-underline-offset: 2px; }
+.md strong { color: rgb(var(--md-strong)); font-weight: 600; }
 .md code {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 0.88em;
-  background: #001E2B;
-  border: 1px solid #1C2D38;
+  background: rgb(var(--ink));
+  border: 1px solid rgb(var(--line));
   padding: 0.1em 0.35em;
   border-radius: 4px;
 }
 .md pre {
-  background: #001E2B;
-  border: 1px solid #1C2D38;
+  background: rgb(var(--ink));
+  border: 1px solid rgb(var(--line));
   border-radius: 8px;
   padding: 10px 12px;
   overflow-x: auto;
@@ -60,24 +118,24 @@ html, body {
 }
 .md pre code { background: none; border: 0; padding: 0; font-size: 0.85em; }
 .md blockquote {
-  border-left: 3px solid #3D4F58;
+  border-left: 3px solid rgb(var(--line2));
   margin: 0.6em 0;
   padding: 0.1em 0 0.1em 0.8em;
-  color: #B8C4C2;
+  color: rgb(var(--muted));
 }
 .md table { border-collapse: collapse; width: 100%; margin: 0.6em 0; font-size: 0.92em; }
-.md th, .md td { border: 1px solid #1C2D38; padding: 5px 9px; text-align: left; }
-.md th { background: #001E2B; font-weight: 600; }
-.md hr { border: none; border-top: 1px solid #1C2D38; margin: 0.8em 0; }
+.md th, .md td { border: 1px solid rgb(var(--line)); padding: 5px 9px; text-align: left; }
+.md th { background: rgb(var(--ink)); font-weight: 600; }
+.md hr { border: none; border-top: 1px solid rgb(var(--line)); margin: 0.8em 0; }
 
 /* Skeleton shimmer for loading states. */
-.skeleton { position: relative; overflow: hidden; background: #16303D; }
+.skeleton { position: relative; overflow: hidden; background: rgb(var(--elevated)); }
 .skeleton::after {
   content: "";
   position: absolute;
   inset: 0;
   transform: translateX(-100%);
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+  background: linear-gradient(90deg, transparent, rgb(var(--content) / 0.06), transparent);
   animation: shimmer 1.4s infinite;
 }
 @keyframes shimmer { 100% { transform: translateX(100%); } }

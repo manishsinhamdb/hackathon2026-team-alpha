@@ -6,6 +6,7 @@ import { ChevronDown, Droplet, Library, Plus, User } from "lucide-react";
 import type { PocSummary } from "@/lib/types";
 import { fmtDateShort } from "@/lib/format";
 import { HealthChip, StatusPill } from "./ui";
+import ThemeToggle from "./ThemeToggle";
 
 // The product mark: a green rounded square with a droplet glyph (the design's leaf/drop mark).
 function ProductMark() {
@@ -120,6 +121,7 @@ export default function TopBar({
           <Library className="h-4 w-4" /> POC library
         </Link>
         <HealthChip project={project} state={connection} />
+        <ThemeToggle />
         <div
           className="flex h-9 w-9 items-center justify-center rounded-full bg-line2 text-content"
           title="Signed-in user"

@@ -31,7 +31,7 @@ export default function MessageBubble({ role, content, at, recovered }: BubblePr
   if (isUser) {
     return (
       <div className="flex flex-col items-end gap-1 self-end" style={{ maxWidth: "78%" }}>
-        <div className="whitespace-pre-line break-words rounded-[14px_14px_4px_14px] bg-greenDark px-3.5 py-3 text-[13px] text-white">
+        <div className="whitespace-pre-line break-words rounded-[14px_14px_4px_14px] bg-greenDark px-3.5 py-3 text-[13px] text-onGreenDark">
           {content}
         </div>
         {at ? <div className="text-[11px] text-faint">{clock(at)}</div> : null}

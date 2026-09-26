@@ -9,6 +9,7 @@ import { fmtClock, fmtDateFull, fmtDuration } from "@/lib/format";
 import { useSessions } from "@/lib/sessions";
 import { Card, CardTitle, StatusPill } from "./ui";
 import { ToastProvider, useToast } from "./Toasts";
+import ThemeToggle from "./ThemeToggle";
 
 const POLL_MS = 10_000;
 
@@ -112,6 +113,7 @@ function LibraryInner() {
           <Link href="/" className="flex h-10 items-center gap-2 rounded-[10px] bg-green px-4 font-semibold text-greenInk hover:opacity-90">
             <Plus className="h-4 w-4" strokeWidth={2.2} /> New POC
           </Link>
+          <ThemeToggle />
         </div>
       </header>
 
