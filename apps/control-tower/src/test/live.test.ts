@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { ACTIVE_POLL_MS, IDLE_POLL_MS, anyRunActive, pocIdIn, pollIntervalMs } from "@/lib/live";
+import {
+  ACTIVE_POLL_MS,
+  IDLE_POLL_MS,
+  anyRunActive,
+  chooseAutoFollow,
+  newPocIds,
+  pocIdIn,
+  pollIntervalMs,
+} from "@/lib/live";
 import type { PocDetail, RunView } from "@/lib/types";
 
 function detailWithRuns(statuses: RunView["status"][]): PocDetail {
@@ -38,5 +46,36 @@ describe("adaptive poll cadence (feature 4)", () => {
     expect(anyRunActive(detailWithRuns(["succeeded", "failed", "cancelled"]))).toBe(false);
     expect(pollIntervalMs(detailWithRuns(["succeeded"]))).toBe(IDLE_POLL_MS);
     expect(pollIntervalMs(detailWithRuns([]))).toBe(IDLE_POLL_MS);
+  });
+});
+
+describe("newPocIds (new-POC-during-turn detection, item 4)", () => {
+  it("returns ids present after but not before", () => {
+    expect(newPocIds(["poc_a", "poc_b"], ["poc_b", "poc_a", "poc_c"])).toEqual(["poc_c"]);
+  });
+  it("returns [] when nothing new appeared", () => {
+    expect(newPocIds(["poc_a"], ["poc_a"])).toEqual([]);
+  });
+  it("handles an empty prior set (first ever POC)", () => {
+    expect(newPocIds([], ["poc_new"])).toEqual(["poc_new"]);
+  });
+});
+
+describe("chooseAutoFollow (selection precedence, item 4)", () => {
+  it("follows a candidate when nothing is selected", () => {
+    expect(chooseAutoFollow({ candidate: "poc_x", selected: "", manualChosen: false })).toBe("poc_x");
+  });
+  it("never overrides a manual selection", () => {
+    expect(chooseAutoFollow({ candidate: "poc_x", selected: "poc_y", manualChosen: true })).toBeNull();
+    expect(chooseAutoFollow({ candidate: "poc_x", selected: "", manualChosen: true })).toBeNull();
+  });
+  it("overrides a differing auto-followed selection (not manual)", () => {
+    expect(chooseAutoFollow({ candidate: "poc_x", selected: "poc_y", manualChosen: false })).toBe("poc_x");
+  });
+  it("does nothing when already following the candidate", () => {
+    expect(chooseAutoFollow({ candidate: "poc_x", selected: "poc_x", manualChosen: false })).toBeNull();
+  });
+  it("does nothing without a candidate", () => {
+    expect(chooseAutoFollow({ candidate: undefined, selected: "", manualChosen: false })).toBeNull();
   });
 });

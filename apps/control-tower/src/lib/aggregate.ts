@@ -40,6 +40,7 @@ export interface RawRun {
   error?: { code: string; message: string; component?: string } | null;
   steps?: Array<{ name: string; status: string }>;
   outputs?: Record<string, unknown>;
+  execution_id?: string; // usually absent in the current schema; passed through if present
 }
 
 export interface RawTask {
@@ -112,6 +113,7 @@ function toRunView(r: RawRun, nowMs: number): RunView {
     current_step: r.current_step,
     error: r.error ?? null,
     steps: (r.steps ?? []).map((s) => ({ name: s.name, status: s.status })),
+    execution_id: r.execution_id,
   };
 }
 

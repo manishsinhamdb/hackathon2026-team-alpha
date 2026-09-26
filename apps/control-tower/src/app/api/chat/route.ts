@@ -37,15 +37,31 @@ export async function POST(req: Request): Promise<Response> {
   try {
     // Stream by default: it keeps the connection alive through a long turn (a rich spec summary exceeds the
     // ~60 s synchronous cap). Fall back to the plain synchronous invoke only if streaming itself errors.
+    let result;
     try {
-      const result = await client.invokeChatStream({ sessionId, message, userId: cfg.uiUserId });
-      return NextResponse.json(result);
+      result = await client.invokeChatStream({ sessionId, message, userId: cfg.uiUserId });
     } catch (streamErr) {
-      const result = await client.invokeChat({ sessionId, message, userId: cfg.uiUserId });
-      return NextResponse.json({ ...result, note: `stream fell back to sync: ${streamErr instanceof Error ? streamErr.message : String(streamErr)}` });
+      // Streaming itself failed — log the raw reason server-side only, then try the synchronous path.
+      console.error("[chat] stream path failed, falling back to sync:", streamErr);
+      result = await client.invokeChat({ sessionId, message, userId: cfg.uiUserId });
     }
+    // The session is still running its previous turn: sanitize to a 409 the UI queues on (no raw JSON).
+    if (result.busy) {
+      return NextResponse.json(
+        { busy: true, code: "SESSION_BUSY", blockingExecutionId: result.blockingExecutionId, blockingStatus: result.blockingStatus },
+        { status: 409 },
+      );
+    }
+    return NextResponse.json(result);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: msg }, { status: 502 });
+    // Any other BFF/platform error: the raw payload (which may echo platform internals) goes to the server
+    // log ONLY; the browser gets a friendly message plus a short, non-secret detail for the disclosure.
+    const raw = err instanceof Error ? err.message : String(err);
+    console.error("[chat] invoke failed:", raw);
+    const httpMatch = raw.match(/HTTP (\d{3})/);
+    return NextResponse.json(
+      { error: "The agent service couldn’t be reached. Please try again in a moment.", detail: httpMatch ? `platform ${httpMatch[0]}` : "invoke error" },
+      { status: 502 },
+    );
   }
 }

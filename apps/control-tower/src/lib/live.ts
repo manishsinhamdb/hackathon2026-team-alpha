@@ -23,3 +23,33 @@ export function anyRunActive(detail: PocDetail): boolean {
 export function pollIntervalMs(detail: PocDetail): number {
   return anyRunActive(detail) ? ACTIVE_POLL_MS : IDLE_POLL_MS;
 }
+
+// --- item 4: auto-follow the POC a turn creates -----------------------------------------------------------
+// The reply-text detection (pocIdIn) misses the case where a turn creates a POC but the reply summarises the
+// spec without repeating the poc_id. So the client also snapshots the poc-id set BEFORE a turn and compares
+// it AFTER: a poc_id present after but not before was created by this turn.
+
+// POC ids that appeared in `after` but were not in `before`.
+export function newPocIds(before: Iterable<string>, after: Iterable<string>): string[] {
+  const seen = new Set(before);
+  const out: string[] = [];
+  for (const id of after) if (!seen.has(id)) out.push(id);
+  return out;
+}
+
+// Selection precedence for auto-follow. Returns the poc to follow, or null to leave the selection alone.
+// MANUAL selection always wins — if the user picked a POC this session we never override it. Otherwise we
+// follow a detected candidate when nothing is selected, or when the current (auto-followed) selection
+// differs from what the turn/DB indicates.
+export function chooseAutoFollow(args: {
+  candidate?: string;
+  selected?: string;
+  manualChosen: boolean;
+}): string | null {
+  const { candidate, selected, manualChosen } = args;
+  if (!candidate) return null;
+  if (manualChosen) return null;
+  if (!selected) return candidate;
+  if (selected === candidate) return null;
+  return candidate;
+}

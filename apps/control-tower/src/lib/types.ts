@@ -39,6 +39,10 @@ export interface RunView {
   current_step?: string;
   error?: { code: string; message: string; component?: string } | null;
   steps: StepView[];
+  // Platform execution id, shown next to a running run in the pipeline header WHEN present. The current DB
+  // schema does not store it on run documents (verified), so this is usually absent; kept optional and
+  // passed through defensively so it appears automatically if the platform starts recording it.
+  execution_id?: string;
 }
 
 export interface TaskView {

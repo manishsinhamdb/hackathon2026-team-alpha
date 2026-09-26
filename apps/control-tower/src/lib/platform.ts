@@ -23,6 +23,27 @@ export interface ChatInvokeResult {
   reply: string;
   status: string;
   pending: boolean; // true when the agent is still replying (e.g. gateway 504 / client timeout)
+  // Set when the platform rejected the turn because the session is still running a previous one (HTTP 409
+  // SESSION_BUSY). The route maps this to a sanitized 409 the UI can queue on — raw JSON never leaks.
+  busy?: boolean;
+  blockingExecutionId?: string;
+  blockingStatus?: string;
+}
+
+// A row from GET .../workspaces/{ws}/runtime-sessions — a session holding reserved sandbox capacity. The
+// `session_id` here IS the UI's X-Session-Id (proven live 2026-09-26). `status` is "active" while capacity
+// is held (includes idle-but-reserved) and "stopping" while it releases.
+export interface RuntimeSession {
+  session_id: string;
+  status: string;
+  is_test_session?: boolean;
+  last_activity_at?: string;
+  scheduled_release_at?: string;
+}
+
+export interface StopResult {
+  stopped: boolean;
+  notFound?: boolean; // the session was already free/gone (the turn finished before we cancelled)
 }
 
 // How long a client-credentials token is trusted, minus this many seconds of safety margin.
@@ -131,6 +152,7 @@ export class PlatformClient {
     }
 
     if (res.status === 504) return pendingResult();
+    if (res.status === 409) return busyResultFromBody(await safeText(res));
     if (res.status >= 400) {
       const text = await safeText(res);
       throw new Error(`chat stream invoke failed: HTTP ${res.status} ${text.slice(0, 300)}`);
@@ -175,6 +197,7 @@ export class PlatformClient {
     }
 
     if (res.status === 504) return pendingResult();
+    if (res.status === 409) return busyResultFromBody(await safeText(res));
     if (res.status >= 400) {
       const text = await safeText(res);
       throw new Error(`chat invoke failed: HTTP ${res.status} ${text.slice(0, 300)}`);
@@ -182,6 +205,56 @@ export class PlatformClient {
     const data = (await res.json()) as Record<string, unknown>;
     return { reply: extractReply(data), status: String(data.status ?? "completed"), pending: false };
   }
+
+  private runtimeSessionsUrl(): string {
+    return `${this.cfg.baseUrl}/api/v1/projects/${this.cfg.projectId}/workspaces/${this.cfg.chatWorkspaceId}/runtime-sessions`;
+  }
+
+  // List the sessions currently holding reserved runtime capacity for the chat workspace. Used to show the
+  // "busy" dot in the Sessions card (item 3). Refreshes the token once on 401.
+  async listRuntimeSessions(): Promise<RuntimeSession[]> {
+    const get = (token: string) =>
+      this.fetchImpl(this.runtimeSessionsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    let res = await get(await this.tokens.get());
+    if (res.status === 401) res = await get(await this.tokens.get(true));
+    if (res.status >= 400) {
+      const text = await safeText(res);
+      throw new Error(`runtime-sessions list failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+    }
+    const data = (await res.json()) as { sessions?: RuntimeSession[] };
+    return data.sessions ?? [];
+  }
+
+  // Cancel the running turn on a session by stopping its reserved runtime (item 3). Wire call proven live:
+  //   POST .../workspaces/{ws}/runtime-sessions/{sessionId}/stop  -> 200 accepted / 404 if already free.
+  // A 404 is not an error here — it just means the turn finished before we cancelled. Token refresh on 401.
+  async stopRuntimeSession(sessionId: string): Promise<StopResult> {
+    const url = `${this.runtimeSessionsUrl()}/${encodeURIComponent(sessionId)}/stop`;
+    const post = (token: string) =>
+      this.fetchImpl(url, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+    let res = await post(await this.tokens.get());
+    if (res.status === 401) res = await post(await this.tokens.get(true));
+    if (res.status === 404) return { stopped: false, notFound: true };
+    if (res.status >= 400) {
+      const text = await safeText(res);
+      throw new Error(`runtime-session stop failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+    }
+    return { stopped: true };
+  }
+}
+
+// Parse the platform's 409 SESSION_BUSY body into a busy result. Never surfaces the raw JSON to the UI.
+function busyResultFromBody(text: string): ChatInvokeResult {
+  let blockingExecutionId: string | undefined;
+  let blockingStatus: string | undefined;
+  try {
+    const j = JSON.parse(text) as Record<string, unknown>;
+    if (typeof j.blocking_execution_id === "string") blockingExecutionId = j.blocking_execution_id;
+    if (typeof j.blocking_status === "string") blockingStatus = j.blocking_status;
+  } catch {
+    /* non-JSON 409 — still treat as busy */
+  }
+  return { reply: "", status: "busy", pending: false, busy: true, blockingExecutionId, blockingStatus };
 }
 
 function pendingResult(): ChatInvokeResult {
