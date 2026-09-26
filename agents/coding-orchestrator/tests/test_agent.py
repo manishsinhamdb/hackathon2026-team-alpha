@@ -5,6 +5,7 @@ poc_shared_tools.platform_invoke.start_invoke and drive the coder's task documen
 its root session) through FakeMD; the transport itself (token exchange, 401 -> refresh + retry) is covered
 end to end by faking platform_invoke._http. Coverage includes a coder that 504s then completes, and one that
 never completes (-> CODER_TIMEOUT)."""
+import contextlib
 import json
 
 import pytest
@@ -73,6 +74,7 @@ class FakeMD:
         self.tasks: dict = {}          # task_id -> task doc (coders mark these; the orchestrator polls them)
         self.completion: dict = {}     # task_id -> {"after": n, "status", "output_ref", "error"} for delayed completes
         self._polls: dict = {}         # task_id -> poll count, to resolve a scheduled delayed completion
+        self.touches: dict = {}        # run_id -> heartbeat touches
 
     def now(self):
         return "2026-09-24T12:00:00Z"
@@ -105,15 +107,43 @@ class FakeMD:
                 return
         r["steps"].append({"name": name, "status": status})
 
-    def create_task(self, run_id, poc_id, agent, tool, mode=None, input_ref=None, task_id=None):
+    def create_task(self, run_id, poc_id, agent, tool, mode=None, input_ref=None, task_id=None, component=None):
         tid = task_id or new_id("task")
-        self.tasks[tid] = {"task_id": tid, "run_id": run_id, "poc_id": poc_id, "agent": agent,
-                           "tool": tool, "mode": mode, "status": "running"}
+        seq = sum(1 for t in self.tasks.values() if t.get("run_id") == run_id) + 1
+        self.tasks[tid] = {"task_id": tid, "run_id": run_id, "poc_id": poc_id, "agent": agent, "seq": seq,
+                           "tool": tool, "mode": mode, "status": "running", "started_at": _real_now()}
+        if component:
+            self.tasks[tid]["component"] = component
         return dict(self.tasks[tid])
 
-    def finish_task(self, task_id, status, output_ref=None, duration_ms=None, token_usage=None, error=None):
+    def list_tasks(self, run_id):
+        return sorted((json.loads(json.dumps(t)) for t in self.tasks.values() if t.get("run_id") == run_id),
+                      key=lambda t: t.get("seq", 0))
+
+    def touch_run(self, run_id):
+        self.touches[run_id] = self.touches.get(run_id, 0) + 1
+
+    def heartbeat(self, run_id, every_s=30):
+        self.touch_run(run_id)
+        return contextlib.nullcontext()
+
+    def reopen_run(self, run_id, reason, execution=None):
+        r = self.runs[run_id]
+        if r["status"] in ("succeeded", "cancelled"):
+            from poc_shared_tools.errors import ToolError
+            raise ToolError("RUN_NOT_RESUMABLE", run_id)
+        r["status"] = "running"
+        r.pop("error", None)
+        r["executions"] = r.get("executions", 0) + 1
+        r.setdefault("continuations", []).append({"reason": reason, "execution": execution})
+        return dict(r)
+
+    def finish_task(self, task_id, status, output_ref=None, duration_ms=None, token_usage=None, error=None,
+                    component=None):
         t = self.tasks.setdefault(task_id, {"task_id": task_id, "status": "running"})
         t["status"] = status
+        if component:
+            t["component"] = component
         if output_ref is not None:
             t["output_ref"] = output_ref
         if token_usage is not None:
@@ -121,9 +151,10 @@ class FakeMD:
         if error is not None:
             t["error"] = error
 
-    def mark_coder_task(self, task_id, status, output_ref=None, token_usage=None, error=None):
+    def mark_coder_task(self, task_id, status, output_ref=None, token_usage=None, error=None, component=None):
         if task_id:
-            self.finish_task(task_id, status, output_ref=output_ref, token_usage=token_usage, error=error)
+            self.finish_task(task_id, status, output_ref=output_ref, token_usage=token_usage, error=error,
+                             component=component)
 
     def get_task(self, task_id):
         sched = self.completion.get(task_id)  # a coder that finishes only after `after` polls (504-then-completes)
@@ -156,6 +187,11 @@ class FakeMD:
         class DB:
             runs = Runs()
         return DB()
+
+
+def _real_now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _apply_set(doc, sets):
@@ -409,3 +445,161 @@ def test_coders_go_through_platform_invoke_and_refresh_token_on_401(fake_md, fak
     assert state["invoke"] == 5
     # exactly two token exchanges: the initial mint + one forced refresh after the 401 (not once per coder).
     assert state["token"] == 2
+
+
+# =============================================================================
+# Resilient runs: continue_run (resume at first step not done), single-call
+# bounded waits, self-continuation (hand-over) and the stable task component key.
+# =============================================================================
+
+def _env(tool: str, params: dict, mode: str | None = None) -> dict:
+    return Envelope.request(poc_id=POC, run_id=new_id("run"), caller="chat_agent", agent="coding_orchestrator",
+                            tool=tool, params=params, task_id=TASK, mode=mode)
+
+
+def _run_graph(env: dict, thread: str = "t") -> dict:
+    out = m.build_agent().invoke({"messages": [HumanMessage(content=json.dumps(env))]},
+                                 config={"configurable": {"thread_id": thread}})
+    return validate("agent_envelope", json.loads(out["messages"][-1].content))["response"]
+
+
+def _abandoned_run(md, done_steps, *, record_steps=None, extra_tasks=()):
+    """A code run killed mid-way: tasks for `done_steps` succeeded (legacy docs: no `component`), run steps
+    recorded only for `record_steps`, status still running with a plan already stored."""
+    plan = pipeline.build_plan({"tool": "start_code_run", "poc_id": POC, "spec_version": "v001", "code_version": "v001"})
+    run = md.create_run(POC, "code", "chat_agent", "coding_orchestrator", {"spec_version": "v001"})
+    rid = run["run_id"]
+    md.runs[rid].update(status="running", outputs={
+        "code_version": "v001", "spec_version": "v001", "plan": plan,
+        "ctx": {"tool": "start_code_run", "poc_id": POC, "spec_version": "v001", "code_version": "v001"}})
+    by_step = {s["step"]: s for s in plan["steps"]}
+    for name in done_steps:
+        st = by_step[name]
+        t = md.create_task(rid, POC, st["agent"], st["tool"], st["mode"])
+        key = f"pocs/{POC}/code/v001/api_contract.yaml" if name == "contract" else f"pocs/{POC}/code/v001/{name}/"
+        md.finish_task(t["task_id"], "succeeded", output_ref=key)
+        if name in (record_steps if record_steps is not None else done_steps):
+            md.update_run_step(rid, f"{name}:done", "succeeded")
+            if name == "contract":
+                md.runs[rid]["outputs"]["contract_key"] = key
+            else:
+                md.runs[rid]["outputs"].setdefault("component_keys", {})[name] = key
+    for name, status in extra_tasks:
+        st = by_step[name]
+        t = md.create_task(rid, POC, st["agent"], st["tool"], st["mode"], component=name)
+        if status != "running":
+            md.finish_task(t["task_id"], status)
+    md.pocs[POC]["status"] = "coding"
+    return rid
+
+
+def test_continue_all_coders_done_runs_only_assemble_and_finalize(fake_md, fake_s3, monkeypatch):
+    """Today's abandoned run: all four coder tasks succeeded but frontend:done was never recorded. continue_run
+    fires NO coder, records the missing frontend step + key, assembles, finalizes → code_ready v001."""
+    rid = _abandoned_run(fake_md, ["contract", "seed", "backend", "frontend"],
+                         record_steps=["contract", "seed", "backend"])
+    fired = []
+    _fake_coder_start(monkeypatch, {k: (lambda env, k=k: fired.append(k)) for k in ("generate-api", "generate-seed", "generate-frontend")})
+    _fast_poll(monkeypatch)
+    resp = _run_graph(_env("continue_run", {"run_id": rid}, mode="continue"))
+    assert resp["status"] == "succeeded", resp
+    assert fired == []
+    run = fake_md.runs[rid]
+    assert run["status"] == "succeeded" and run["executions"] == 1
+    assert run["outputs"]["component_keys"]["frontend"] == f"pocs/{POC}/code/v001/frontend/"
+    assert {"name": "frontend:done", "status": "succeeded"} in run["steps"]
+    assert fake_md.pocs[POC]["status"] == "code_ready"
+    assert fake_md.pocs[POC]["current_versions"]["code"] == "v001"
+
+
+def test_continue_resumes_from_first_step_not_done(fake_md, fake_s3, monkeypatch):
+    """contract + seed done, backend failed: continue fires backend + frontend only, same code_version."""
+    rid = _abandoned_run(fake_md, ["contract", "seed"], extra_tasks=[("backend", "failed")])
+    calls = []
+    _fake_coder_start(monkeypatch, _coder_handlers(calls, fake_md))
+    _fast_poll(monkeypatch)
+    resp = _run_graph(_env("continue_run", {"run_id": rid}, mode="continue"))
+    assert resp["status"] == "succeeded", resp
+    assert calls == [("generate_api", "code"), ("generate_frontend", "code")]
+    assert resp["result"]["code_version"] == "v001"
+
+
+def test_continue_reattaches_to_in_flight_coder_without_refiring(fake_md, fake_s3, monkeypatch):
+    rid = _abandoned_run(fake_md, ["contract", "seed", "backend"], extra_tasks=[("frontend", "running")])
+    inflight = next(t for t in fake_md.tasks.values() if t.get("component") == "frontend")
+    fake_md.completion[inflight["task_id"]] = {"after": 2, "status": "succeeded", "output_ref": f"pocs/{POC}/code/v001/frontend/"}
+    fired = []
+    _fake_coder_start(monkeypatch, {"generate-frontend": lambda env: fired.append(env)})
+    _fast_poll(monkeypatch)
+    resp = _run_graph(_env("continue_run", {"run_id": rid}, mode="continue"))
+    assert resp["status"] == "succeeded", resp
+    assert fired == []
+
+
+def test_continue_is_idempotent_on_a_succeeded_run(fake_md, fake_s3, monkeypatch):
+    rid = _abandoned_run(fake_md, ["contract", "seed", "backend", "frontend"])
+    fake_md.runs[rid]["status"] = "succeeded"
+    resp = _run_graph(_env("continue_run", {"run_id": rid}, mode="continue"))
+    assert resp["status"] == "succeeded" and resp["result"]["already"] == "succeeded"
+    assert "executions" not in fake_md.runs[rid]
+
+
+def test_self_handover_carries_the_run_across_executions(fake_md, fake_s3, monkeypatch):
+    """Tool-call budget exceeded at a step boundary → the execution fires continue_run on ITSELF (skill
+    code-orchestration) and replies `started`; driving each handed-over envelope finishes the run normally."""
+    monkeypatch.setattr(m, "HANDOVER_TOOL_CALLS", 6)
+    calls, handovers = [], []
+    handlers = _coder_handlers(calls, fake_md)
+    handlers["code-orchestration"] = lambda env: handovers.append(env)
+    _fake_coder_start(monkeypatch, handlers)
+    _fast_poll(monkeypatch)
+    resp = _run_graph(_env("start_code_run", {"poc_id": POC, "spec_version": "v001"}), "h0")
+    executions = 1
+    while resp["status"] == "started":
+        env = handovers.pop()
+        assert env["request"]["tool"] == "continue_run" and env["request"]["mode"] == "continue"
+        resp = _run_graph(env, f"h{executions}")
+        executions += 1
+    assert resp["status"] == "succeeded", resp
+    assert executions >= 2
+    assert calls == [("generate_api", "contract"), ("generate_seed", "code"),
+                     ("generate_api", "code"), ("generate_frontend", "code")]  # each coder fired exactly once
+    run = next(r for r in fake_md.runs.values() if r["stage"] == "code")
+    assert run["status"] == "succeeded" and run["executions"] == executions - 1
+
+
+def test_elapsed_budget_triggers_handover(monkeypatch):
+    monkeypatch.setattr(m, "HANDOVER_AFTER_S", 360)
+    monkeypatch.setattr(m, "HANDOVER_TOOL_CALLS", 25)
+    assert not m.over_budget({"exec_started": 1000.0, "tool_calls": 10, "calls_base": 0}, now=1300.0)
+    assert m.over_budget({"exec_started": 1000.0, "tool_calls": 10, "calls_base": 0}, now=1361.0)
+    assert m.over_budget({"exec_started": 1000.0, "tool_calls": 26, "calls_base": 0}, now=1001.0)
+    assert not m.over_budget({"exec_started": 1000.0, "tool_calls": 30, "calls_base": 10}, now=1001.0)
+
+
+def test_wait_task_is_one_bounded_call_that_reports_still_running(fake_md, monkeypatch):
+    monkeypatch.setattr(m, "CODER_POLL_INTERVAL_S", 0.05)
+    run = fake_md.create_run(POC, "code", "chat_agent", "coding_orchestrator", {})
+    t = fake_md.create_task(run["run_id"], POC, "frontend_agent", "generate_frontend", "code", component="frontend")
+    out = json.loads(m.orch_wait_task(t["task_id"], run["run_id"], 1))
+    assert out["status"] == "running"
+    assert fake_md.touches[run["run_id"]] >= 1  # heartbeated while waiting
+    fake_md.finish_task(t["task_id"], "succeeded", output_ref="k/")
+    out = json.loads(m.orch_wait_task(t["task_id"], run["run_id"], 1))
+    assert out["status"] == "succeeded" and out["output_ref"] == "k/"
+
+
+def test_tasks_carry_a_distinct_stable_component_key(fake_md, fake_s3, monkeypatch):
+    """contract and backend are both api_agent/generate_api; tasks.component tells them apart."""
+    _invoke("start_code_run", {"poc_id": POC, "spec_version": "v001"}, _coder_handlers([], fake_md), monkeypatch)
+    comps = [t["component"] for t in sorted(fake_md.tasks.values(), key=lambda t: t["seq"])]
+    assert comps == ["contract", "seed", "backend", "frontend"]
+
+
+def test_legacy_task_component_is_derived_from_mode():
+    from poc_shared_tools import metadata as md
+    assert md.task_component({"agent": "api_agent", "mode": "contract"}) == "contract"
+    assert md.task_component({"agent": "api_agent", "mode": "code"}) == "backend"
+    assert md.task_component({"agent": "api_agent", "mode": "repair"}) == "backend"
+    assert md.task_component({"agent": "frontend_agent", "mode": "code"}) == "frontend"
+    assert md.task_component({"agent": "api_agent", "mode": "code", "component": "backend"}) == "backend"
