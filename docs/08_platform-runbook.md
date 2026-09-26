@@ -221,6 +221,43 @@ the draft stage end to end (docs/06 "Draft stage is now START-AND-POLL"): the Da
 clarification round, and the recsys regression all fast-acked; only the background poll turns took longer,
 and `--stream` carried them with no 504 and no reload.
 
+### 9.1 Client guidance — session threading, busy sessions, and cancel (proven live 2026-09-26)
+
+For a **programmatic client** (e.g. the Control Tower BFF) driving chat over the platform invoke API with a
+project service account, three platform behaviours matter — all reachable with the SA client-credentials
+token:
+
+- **Thread a conversation with the `X-Session-Id` request HEADER, not the body `session_id`.** The platform
+  ignores the body field for threading (it mints a fresh per-execution session each turn) and threads on the
+  header. Send the same header on `/invoke` and `/invokeStream`. (This is the fix for the "I don't have an
+  active POC in context" bug — see docs/09 § Session handling.)
+
+- **A second turn on a session that is still running the previous one is rejected with HTTP `409`
+  `{"code":"SESSION_BUSY","blocking_execution_id":…,"blocking_status":"pending"}`.** This is a pre-flight
+  guard: the send is **not** enqueued, so a client may safely re-attempt the same message on a poll (a 409
+  never double-sends). The Control Tower queues the message, polls every 5 s, and auto-sends when the 409
+  stops. A client must never surface this raw JSON to a user.
+
+- **Runtime sessions — list and cancel** (the source for a "busy" indicator and the Stop button):
+  - `GET  /api/v1/projects/{project}/workspaces/{ws}/runtime-sessions`
+    → `{"sessions":[{"session_id","status":"active"|"stopping","last_activity_at","scheduled_release_at"}]}`.
+    The `session_id` **is** the client's `X-Session-Id`. `status` is `active` while capacity is held
+    (this **includes idle-but-reserved**, up to the workspace idle timeout — it is *not* a precise
+    "a turn is running now" signal; for that, the 409 above is the oracle).
+  - `POST /api/v1/projects/{project}/workspaces/{ws}/runtime-sessions/{session_id}/stop`
+    → `200` accepted (the turn is cancelled and capacity releases; the session then shows `stopping` then
+    disappears), or `404 {"code":"NOT_FOUND"}` if the session was already free. This is exactly what
+    `agentic workspace sessions stop <session-id>` calls (capture with `agentic … -vv`). Proven: a live spec-
+    summary turn stopped in ~1 s, after which the same session accepted "How's it going?" with no 409.
+  - Note the `/api/v1/projects/{project}/executions/{id}` route exists but is unreliable for a busy probe
+    (it 301-redirects / needs a workspace endpoint); use the runtime-sessions list + the 409 oracle instead.
+
+- **No session↔POC or execution id is stored in the `poc_builder` DB.** `conversations` is keyed by `poc_id`
+  (not `session_id`) and `runs` carry no `execution_id`/`session_id`/`trace_id`. A read-only client therefore
+  cannot join a UI session to its POC from the DB — the chat agent keeps that link only in its (internal)
+  LangGraph checkpointer. The Control Tower resolves the followed POC client-side ("a new POC appeared during
+  this turn") with a newest-POC DB fallback; see docs/09 § Auto-follow.
+
 ---
 
 ## 10. Diagnosis commands

@@ -35,7 +35,22 @@ browser  ──HTTP──►  Next.js server (BFF)  ──►  platform invoke A
   Body `{ archived: boolean }`. Agents ignore the field; it only controls UI visibility.
 - `GET /api/summary` — the library "Today" counts (drafted today, deployed & tested today, cloud resources
   live, most recent transcript→tested duration).
+- `POST /api/sessions/:id/stop` — **cancel** the running turn on a chat session (calls the platform
+  `…/runtime-sessions/:id/stop`). `404`/already-free is treated as success.
+- `GET /api/sessions/status?ids=a,b` — which sessions currently hold platform runtime (the busy dot),
+  derived from the platform runtime-sessions list.
+- `GET /api/sessions/:id/poc` — best-effort POC for a session (newest UI-owned POC; see docs/09 § Auto-follow
+  for why this is a fallback — the DB has no session↔POC link).
 - `GET /healthz` — liveness (no DB / platform dependency).
+
+**Round 4 (UI/BFF):** a **resizable** Conversation | Pipeline split (drag/touch/keyboard, persisted,
+pre-paint, ≥380 px panes, hidden below `lg`); **graceful busy handling** — a platform `409 SESSION_BUSY`
+becomes a queued "still finishing…" notice that auto-sends when free (never raw JSON; other errors are a
+friendly toast with a details disclosure); a **Stop** button (in-flight bubble, header, and per busy session
+in the Sessions card) that cancels the session's runtime; **auto-follow** the POC a turn creates even when
+the reply omits the id (client "new POC during turn" + a DB fallback), with the running run id in the
+Pipeline header; and a **searchable combobox** POC selector (type-to-filter on title/id, keyboard nav,
+followed POC pinned).
 
 The client is **two screens** (the approved v2 dark design in `design/`):
 
@@ -114,7 +129,11 @@ filters/counts/sort); the **stepper state mapping** (done / running / gate / not
 `StageStep` render tests; the **archive write** (`setArchived` against a fake collection, asserting it only
 ever touches `ui_archived` / `ui_archived_at`); the **theme** resolver + toggle (attribute + persistence) and
 rendering under both themes; and the **live helpers** (poc-id auto-follow detection, adaptive poll cadence).
-Fake fetch/clock and fixture documents — no network or DB required. `npm test` → 62 tests.
+the **split** clamp/pointer/keyboard/persist logic; the **combobox** filter/sort/timestamp format; the
+**chat busy** classification + the 409→queue→auto-send retry driver + error mapping; the **runtime-session**
+list/stop calls + the 409-busy invoke result; the **session-status** derivation; the **session→POC**
+resolution; and the **new-POC-during-turn** + auto-follow precedence rules.
+Fake fetch/clock and fixture documents — no network or DB required. `npm test` → 117 tests.
 
 ## Point it at another project / workspace
 

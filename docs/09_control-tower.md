@@ -152,6 +152,81 @@ poll. Key properties:
   from the latest run of each stage; the "Spec approved" / "Code approved" cells come from `pocs.approvals`;
   the clarification card from a draft run that finished `succeeded` with `outputs.needs_clarification`.
 
+## Round 4 — resizable split, busy handling, stop/cancel, auto-follow, searchable selector
+
+Five UI/BFF additions, all client + BFF (no agent, `agent.yaml`, or secret changes). Pure logic lives in
+small tested libs; the platform facts they rely on were probed live 2026-09-26 (see docs/08 §9.1).
+
+### Resizable split (`SplitPane`, `src/lib/split.ts`)
+
+A draggable vertical divider sits between the Conversation and Pipeline panes. Pointer drag (mouse **and**
+touch, via Pointer Events), keyboard (Tab to the handle, **←/→** move it 16 px, **Home/End** to min/max),
+and **double-click** to reset to the design's 5/7 split. Each pane keeps a **≥380 px** minimum. The chat
+pane's width is a **percentage held in the CSS variable `--ct-chat-w`**, applied **before first paint** by
+`SPLIT_INIT_SCRIPT` in the layout `<head>` (like the theme script) so there is no layout flash; it's
+clamped by CSS `min/max-width`. The width persists in `localStorage` (`ct.split.v1`). **Below 1024 px the
+stacked layout is unchanged and the handle is hidden.** The handle is a real `<button>` with an `aria-label`,
+`aria-orientation` and a live `aria-valuenow`. `src/lib/split.ts` (clamp/pointer/key/persist) is unit-tested.
+
+### Graceful busy handling (409 SESSION_BUSY → queue → auto-send)
+
+The platform returns **HTTP 409 `{"code":"SESSION_BUSY","blocking_execution_id":…,"blocking_status":…}`**
+when a second turn arrives while a session's previous turn is still running (docs/08 §9.1). The BFF
+(`/api/chat`) maps it to a **sanitized 409** `{busy,code,blockingExecutionId,blockingStatus}` — the raw
+platform JSON is **never** sent to the browser (it goes to the server log only); any other error becomes a
+friendly toast with a **"details" disclosure** (a short, non-secret code like `platform HTTP 500`). The UI
+keeps the message, shows an inline notice *"The agent is still finishing your previous message…"* with a
+**live timer**, and **polls/auto-sends** it when the session frees. Because a 409 is a pre-flight reject
+(the send was never enqueued), the queue simply **re-attempts the same message** — a 409 can't double-send,
+and any *accepted* outcome (200 or a 504 "pending") stops the loop, so an accepted turn is never re-sent.
+Two escape hatches: **Stop the running turn** (below) and **New session** (moves the pending message to a
+fresh session and sends it there). Logic + retry driver in `src/lib/chat.ts`, unit-tested (classify + the
+409→queue→auto-send loop + error mapping).
+
+### Stop a running turn (cancel)
+
+A **Stop** button appears on the in-flight assistant bubble and in the Conversation header, and a **Stop**
+action appears per busy session in the library's Sessions card. The BFF route `POST /api/sessions/:id/stop`
+calls the platform cancel **`POST …/workspaces/{ws}/runtime-sessions/{sessionId}/stop`** with the SA token
+(the same wire call as `agentic workspace sessions stop`; a `404` = already free, treated as success). The
+turn is marked cancelled and the composer unlocks. A **confirm dialog** guards only a turn older than **30 s**.
+The UI only ever passes its own client-generated session ids on the one chat workspace, so this can never
+cancel anything but the current user's own session's execution. Proven live: a spec-summary turn stopped in
+~1 s, and the same session then accepted "How's it going?" with no 409.
+
+### Session busy status (`/api/sessions/status`, `src/lib/sessionStatus.ts`)
+
+The **busy dot** in the Sessions cards and the Conversation header comes from `GET /api/sessions/status?ids=`,
+backed by the platform **runtime-sessions** list (the `session_id` there is the UI's `X-Session-Id`). A
+session is shown busy while it holds/releases capacity (`active`/`stopping`). This is the lightweight status
+source; the authoritative free/busy oracle for auto-send remains the invoke's own 409 (runtime `active`
+lingers through the idle window, so it isn't a precise "turn running now" signal).
+
+### Auto-follow the POC a turn creates (item 4)
+
+The old reply-text detection (`pocIdIn`) missed the case where a turn creates a POC but the reply summarises
+the spec **without** repeating the `poc_id`. The DB has **no `session_id`↔`poc_id` link** to join on
+(`conversations` is keyed by `poc_id`; `runs` carry no execution/session id — verified against the live
+schema), and agent code may not be changed to add it. So the session-correct signal is **client-side**: the
+workspace snapshots the POC-id set before a turn and, if **exactly one new `poc_id`** appears afterwards and
+nothing is manually selected, it follows it (`newPocIds` + `chooseAutoFollow` in `src/lib/live.ts`, with the
+precedence rule *manual selection always wins* — unit-tested). Reply-text detection stays as a fallback, and
+`GET /api/sessions/:id/poc` provides a documented best-effort DB fallback (newest non-archived POC owned by
+`UI_USER_ID`; returns null rather than risk the wrong POC). The **Pipeline header** now also shows the
+currently-running stage's **run id** (copyable) and its platform **execution id** *when the DB records one*
+(the current schema does not, so it's usually absent — surfaced defensively).
+
+### Searchable POC selector (combobox, `src/lib/selector.ts`)
+
+The top-bar dropdown is now an accessible **combobox**: a real `<input role="combobox">` with a `listbox`
+popup and keyboard **↑/↓/Enter/Escape**. Typing filters on **title and poc id** (case-insensitive substring);
+rows show the title, `spec vNNN`, a status pill and the created time formatted **"26 Sep 08:31"**, sorted
+**newest first**, **archived hidden**, with the **currently-followed POC pinned to the top** and marked
+*following*. Empty state *"No POC matches"*, and a **New POC** affordance is the last navigable item. The
+closed control shows the selected POC's title, spec, status and timestamp. `filterPocs`/`sortForSelector`/
+`fmtSelectorTime` in `src/lib/selector.ts` are unit-tested (the month is a fixed 3-letter table so the format
+is stable across ICU versions).
+
 ## Why the BFF holds the credentials
 
 The Next.js **server routes are a Backend-For-Frontend**. The browser talks only to `/api/*` on the same
@@ -240,9 +315,26 @@ at `/healthz`, expose `PORT`. Nothing else changes between local Docker and the 
 - **Both screens checked in a real browser in both themes** driving the medicine-finder POC (workspace +
   library, dark + light). The adaptive poll indicator shows the countdown ring (2 min while idle) and
   Refresh-now button. No code/deploy/teardown run — no AWS/Atlas resources.
-- **Unit tests:** 62 passing (token cache + SSE parsing + session-header threading; POC aggregation; stepper
+- **Unit tests:** 117 passing (token cache + SSE parsing + session-header threading; POC aggregation; stepper
   mapping; archive write; theme resolver/toggle/both-theme render; live auto-follow + adaptive-cadence
-  helpers) with fake fetch/clock and fixture DB documents.
+  helpers) with fake fetch/clock and fixture DB documents. **Round 4 added 55:** split clamp/pointer/key/
+  persist; combobox filter/sort/format; chat classify + 409→queue→auto-send + error mapping; runtime-session
+  list/stop + 409 busy; session-status derivation; session→POC resolution; new-POC-during-turn + auto-follow
+  precedence.
+
+### Round 4 verification (2026-09-26)
+
+- **Items 1 & 5 (splitter, combobox)** verified from the served SSR markup (`role="combobox"`, the resize
+  handle's `aria-label`, the `ct-split-chat` class and the split pre-paint script) plus their unit tests.
+- **Item 2 (busy)** proven live end-to-end through the BFF: a long spec-summary turn held a session `active`;
+  a second message on it returned **HTTP 409** with the sanitized `{busy,code:SESSION_BUSY,
+  blockingExecutionId,blockingStatus}` body (no raw platform JSON); `/api/sessions/status` reported it busy.
+- **Item 3 (stop)** proven live: `POST /api/sessions/:id/stop` → `{stopped:true}`; the session went
+  `active → free`; the same session then accepted "How's it going?" with **HTTP 200, no 409**. Cancel wire
+  call: `POST …/workspaces/{ws}/runtime-sessions/{sessionId}/stop`.
+- **Item 4** — `/api/sessions/:id/poc` returns the newest `UI_USER_ID`-owned POC (null when none, never a
+  wrong POC); the running run id shows in the Pipeline header. No POCs were created and **no AWS/Atlas
+  resources** were touched (POC count unchanged before/after).
 
 ## Deploy on Kanopy (staging, namespace `sa-demo`)
 
