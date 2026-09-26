@@ -419,3 +419,128 @@ def test_plain_reply_no_tools(monkeypatch):
     _install_fakes(monkeypatch)
     out = _run_graph(ScriptedLLM([AIMessage(content="Hello! Paste a transcript to begin.")]))
     assert out["messages"][-1].content.startswith("Hello")
+
+
+# =============================================================================
+# abandoned runs — never block; continue a resumable run in place, else start fresh
+# =============================================================================
+
+OLD, NEW = new_id("run"), new_id("run")
+
+
+def _stale_run(stage="code", **kw):
+    doc = {"run_id": OLD, "poc_id": POC, "stage": stage, "status": "running", "executions": 1,
+           "started_at": "2026-01-01T08:00:00Z", "heartbeat_at": "2026-01-01T08:05:00Z",
+           "inputs": {"spec_version": "v001", "code_version": "v001"},
+           "outputs": {"plan": [{"step": "contract"}], "code_version": "v001"},
+           "steps": [{"name": "fetch_bundle", "status": "succeeded"}]}
+    doc.update(kw)
+    return doc
+
+
+def _fake_liveness(monkeypatch, run):
+    """Newest run = `run`; abandon/get_run act on it; invokes are recorded; a continue reopens the run."""
+    import poc_shared_tools.metadata as md
+    state = {"run": dict(run) if run else None, "abandoned": [], "invokes": []}
+
+    def abandon(run_id, reason="abandoned: heartbeat stale"):
+        state["abandoned"].append((run_id, reason))
+        state["run"].update(status="failed", error={"code": "ABANDONED", "message": reason, "retryable": True})
+        return dict(state["run"])
+
+    def fake_iw(workspace_id, message, *, session_id, user_id, timeout_s=120):
+        env = json.loads(message)
+        state["invokes"].append({"ws": workspace_id, "env": env, "session_id": session_id})
+        if env["request"].get("mode") == "continue":
+            state["run"].update(status="running", executions=state["run"]["executions"] + 1)
+            rid = state["run"]["run_id"]
+        else:
+            rid = NEW
+        body = {"response": {"task_id": env["request"]["task_id"], "status": "started", "result": {"run_id": rid}}}
+        return {"success": True, "response": json.dumps(body), "status": "completed"}
+
+    monkeypatch.setattr(m, "_newest_run", lambda poc_id, stage: dict(state["run"]) if state["run"] else None)
+    monkeypatch.setattr(md, "abandon_run", abandon)
+    monkeypatch.setattr(md, "get_run", lambda run_id: dict(state["run"]))
+    monkeypatch.setattr(md, "get_poc", lambda poc_id: {"poc_id": poc_id, "current_versions": {"spec": "v001", "code": "v001"}})
+    monkeypatch.setattr(m.platform_invoke, "resolve_workspace_id", lambda skill: f"ws-{skill}")
+    monkeypatch.setattr(m.platform_invoke, "invoke_workspace", fake_iw)
+    monkeypatch.setattr(m, "RUN_APPEAR_POLL_S", 0)
+    return state
+
+
+def test_start_code_run_continues_abandoned_resumable_run(monkeypatch):
+    """The 2026-09-26 case: the code run is 'running' with a dead heartbeat. Starting code again marks it
+    abandoned and CONTINUES it in place (same run_id, mode continue) rather than blocking or rebuilding."""
+    st = _fake_liveness(monkeypatch, _stale_run())
+    out = json.loads(m.chat_start_code_run(POC, "v001"))
+    assert st["abandoned"] == [(OLD, "abandoned: heartbeat stale")]
+    assert out["mode"] == "continue" and out["run_id"] == OLD and out["abandoned_run_id"] == OLD
+    assert out["status"] == "running"
+    (inv,) = st["invokes"]
+    req = inv["env"]["request"]
+    assert inv["ws"] == "ws-code-orchestration"
+    assert req["tool"] == "continue_run" and req["mode"] == "continue" and req["run_id"] == OLD
+    assert req["params"]["run_id"] == OLD and req["params"]["reason"] == "abandoned"
+    assert inv["session_id"].startswith(f"code-{OLD}-retry2-")
+
+
+def test_start_code_run_refuses_while_live(monkeypatch):
+    from poc_shared_tools import metadata as md
+    st = _fake_liveness(monkeypatch, _stale_run(heartbeat_at=md._now() if hasattr(md, "_now") else None))
+    monkeypatch.setattr(md, "run_is_stale", lambda run, *a, **k: False)
+    out = json.loads(m.chat_start_code_run(POC, "v001"))
+    assert out == {"status": "already_running", "mode": "already_running", "run_id": OLD}
+    assert st["invokes"] == [] and st["abandoned"] == []
+
+
+def test_start_code_run_fresh_when_abandoned_run_not_resumable(monkeypatch):
+    """An abandoned run that never produced a plan (or was for another spec version) → a fresh run."""
+    st = _fake_liveness(monkeypatch, _stale_run(outputs={}))
+    out = json.loads(m.chat_start_code_run(POC, "v001"))
+    assert st["abandoned"] and out["mode"] == "fresh" and out["run_id"] == NEW
+    assert st["invokes"][0]["env"]["request"]["tool"] == "start_code_run"
+
+    st = _fake_liveness(monkeypatch, _stale_run())
+    out = json.loads(m.chat_start_code_run(POC, "v002"))
+    assert out["mode"] == "fresh" and st["invokes"][0]["env"]["request"]["params"]["spec_version"] == "v002"
+
+
+def test_retry_stage_continues_failed_deploy_and_starts_fresh_otherwise(monkeypatch):
+    st = _fake_liveness(monkeypatch, _stale_run(stage="deploy", status="failed",
+                                                error={"code": "TEST_FAILED", "message": "x", "retryable": True}))
+    out = json.loads(m.chat_retry_stage(POC, "deploy"))
+    assert out["mode"] == "continue" and out["run_id"] == OLD and "abandoned_run_id" not in out
+    req = st["invokes"][0]["env"]["request"]
+    assert st["invokes"][0]["ws"] == "ws-deploy-operations" and req["mode"] == "continue" and req["params"]["reason"] == "retry"
+
+    # nothing succeeded yet → fresh deploy with the current code version
+    st = _fake_liveness(monkeypatch, _stale_run(stage="deploy", status="failed", steps=[], error={"code": "X"}))
+    out = json.loads(m.chat_retry_stage(POC, "deploy"))
+    assert out["mode"] == "fresh"
+    req = st["invokes"][0]["env"]["request"]
+    assert req["tool"] == "start_deploy_run" and req["params"]["code_version"] == "v001"
+
+    # no previous run at all → fresh
+    st = _fake_liveness(monkeypatch, None)
+    out = json.loads(m.chat_retry_stage(POC, "code"))
+    assert out["mode"] == "fresh" and st["invokes"][0]["env"]["request"]["params"] == {"poc_id": POC, "spec_version": "v001"}
+
+    assert json.loads(m.chat_retry_stage(POC, "bogus"))["error"]["code"] == "BAD_STAGE"
+
+
+def test_find_run_surfaces_staleness(monkeypatch):
+    import poc_shared_tools.metadata as md
+
+    class FakeRuns:
+        def find_one(self, q, sort=None):
+            return {"_id": 1, **_stale_run()}
+
+    monkeypatch.setattr(md, "_db", lambda: type("DB", (), {"runs": FakeRuns()})())
+    out = json.loads(m.chat_find_run(POC, "code"))
+    assert out["stale"] is True and out["executions"] == 1 and out["heartbeat_at"]
+
+
+def test_system_prompt_maps_retry_and_continue():
+    p = m.SYSTEM_PROMPT
+    assert "chat_retry_stage" in p and "continue the build" in p.lower() and "abandoned" in p.lower()

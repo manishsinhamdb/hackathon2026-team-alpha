@@ -88,7 +88,9 @@ The pipeline and its human-in-the-loop GATES (follow exactly):
    spec_approved for the current spec_version; a deploy run needs code_approved for the current
    code_version. If the gate is missing, say exactly what is missing and do not start the stage.
 6. ONE RUN PER STAGE. Before starting a stage, call chat_find_run(poc_id, stage) and refuse to start a
-   second run of the same stage while one is queued/running.
+   second run of the same stage while one is queued/running AND live. A run that is queued/running but
+   `stale: true` (no heartbeat for 3 min) was ABANDONED — its execution died. Never block on it: the start
+   tools and chat_retry_stage mark it failed ("abandoned: heartbeat stale") and carry on.
 7. START STAGES. After spec_approved: chat_start_code_run(poc_id, spec_version). After code_approved:
    chat_start_deploy_run(poc_id, code_version, options_json) with options
    {"db_mode":"shared_db","run_tests":true,"ttl_hours":4} unless the user says otherwise. Re-run tests with
@@ -100,7 +102,16 @@ The pipeline and its human-in-the-loop GATES (follow exactly):
 8. PROGRESS + ERRORS. Answer "how's it going?" for code/deploy/test/teardown from chat_get_run_status(run_id)
    (find the run first with chat_find_run). Runs finish in the background, so a stage may still be running or
    already terminal when asked. If a run failed, read the error and offer the next action (retry, tear down,
-   or fix). For draft, follow rule 2.
+   or fix). A run with `stale: true` or error.code ABANDONED was abandoned — say so plainly and offer
+   "retry" / "continue". A long run may carry itself across several executions (runs.executions); that is
+   normal, not an error. For draft, follow rule 2.
+8b. RETRY / CONTINUE. "retry", "retry the build", "continue the build", "resume the deploy", or the Control
+   Tower message "Retry the <stage> stage for <poc_id> (continue run <run_id> if it can be resumed)." ->
+   chat_retry_stage(poc_id, stage) with stage code|deploy|draft|test|teardown ("the build" = code, "the
+   deploy" = deploy). It marks an abandoned run failed, CONTINUES a resumable run in place (same run_id,
+   picks up at the first unfinished step, reusing everything already produced) or else starts a fresh run.
+   Report which it did (result.mode "continue" or "fresh"), the run_id, and invite "how's it going?". Do not
+   re-record approvals for a retry. For draft, "retry drafting" still re-fires chat_call_draft (rule 3).
 9. STATUS. draft done -> poc status spec_ready; code run done -> code_ready; deploy+test done -> tested;
    teardown -> torn_down. Read chat_get_poc(poc_id) to confirm status/versions when unsure.
 10. Keep a transcript of the conversation: after the user's message and again before your final reply, call
@@ -116,6 +127,7 @@ What the user can say (examples):
 - "Looks good, go ahead and build it"         -> record spec_approved, start code run
 - "How's it going?" (after a code/deploy run) -> report run status
 - "Deploy it, I don't need to review the code"-> record code_approved (implicit), start deploy run
+- "Continue the build" / "retry"             -> chat_retry_stage(poc_id, "code") — continue or fresh start
 - "Tear it down"                              -> teardown
 """
 
@@ -177,7 +189,8 @@ def chat_find_run(poc_id: str, stage: str) -> str:
         return json.dumps({"error": {"code": "NO_RUN", "message": f"no {stage} run for {poc_id}"}})
     doc.pop("_id", None)
     return json.dumps({k: doc.get(k) for k in ("run_id", "poc_id", "stage", "status", "current_step",
-                                               "error", "outputs", "started_at")}, default=str)
+                                               "error", "outputs", "started_at", "heartbeat_at", "executions")}
+                      | {"stale": md.run_is_stale(doc)}, default=str)
 
 
 @app.tool(timeout=30)
@@ -235,9 +248,11 @@ def chat_call_draft(poc_id: str, answers_json: str = "", force_assumptions: bool
 
 @app.tool(timeout=290)
 def chat_start_code_run(poc_id: str, spec_version: str) -> str:
-    """Start the Stage-2 code run (background). Returns {"status", "run_id"}."""
-    return json.dumps(_invoke_run("code-orchestration", "coding_orchestrator", "start_code_run", poc_id,
-                                  {"poc_id": poc_id, "spec_version": spec_version}, "code"), default=str)
+    """Start the Stage-2 code run (background). An abandoned (stale) code run is marked failed first and, if it
+    was for the same spec_version and is resumable, continued instead of rebuilt. Returns {"status", "run_id"}."""
+    return json.dumps(_start_stage(poc_id, "code", {"poc_id": poc_id, "spec_version": spec_version},
+                                   same_version=lambda r: (r.get("inputs") or {}).get("spec_version") == spec_version),
+                      default=str)
 
 
 @app.tool(timeout=290)
@@ -250,8 +265,8 @@ def chat_start_deploy_run(poc_id: str, code_version: str, options_json: str = ""
             options = json.loads(options_json)
         except json.JSONDecodeError:
             return json.dumps({"status": "failed", "error": {"code": "BAD_OPTIONS_JSON", "message": options_json[:200]}})
-    return json.dumps(_invoke_run("deploy-operations", "deploy_agent", "start_deploy_run", poc_id,
-                                  {"poc_id": poc_id, "code_version": code_version, "options": options}, "deploy"),
+    return json.dumps(_start_stage(poc_id, "deploy", {"poc_id": poc_id, "code_version": code_version, "options": options},
+                                   same_version=lambda r: (r.get("inputs") or {}).get("code_version") == code_version),
                       default=str)
 
 
@@ -271,6 +286,42 @@ def chat_teardown(poc_id: str) -> str:
                                   {"poc_id": poc_id}, "teardown"), default=str)
 
 
+@app.tool(timeout=290)
+def chat_retry_stage(poc_id: str, stage: str) -> str:
+    """Retry / continue a stage (the Control Tower Retry chip, "retry", "continue the build"). A live run is
+    reported as already running; a stale (abandoned) one is marked failed ("abandoned: heartbeat stale").
+    Then a resumable code/deploy run is CONTINUED in place (mode "continue": same run_id, resumes at the first
+    unfinished step); otherwise a fresh run starts with the POC's current version. Returns
+    {"status", "run_id", "mode": "continue"|"fresh"|"already_running", "abandoned_run_id"?}."""
+    from poc_shared_tools import metadata as md
+    if stage not in STAGE_CALLEES:
+        return json.dumps({"status": "failed", "error": {"code": "BAD_STAGE", "message": f"stage must be one of {sorted(STAGE_CALLEES)}"}})
+    guard = _prepare_stage(poc_id, stage)
+    if guard.get("busy"):
+        return json.dumps({"status": "already_running", "mode": "already_running", "run_id": guard["busy"]["run_id"]})
+    prev = guard.get("run")
+    extra = {"abandoned_run_id": guard["abandoned"]} if guard.get("abandoned") else {}
+    if prev and _resumable(prev):
+        return json.dumps(_continue_stage(poc_id, stage, prev["run_id"], "retry") | {"mode": "continue"} | extra, default=str)
+    try:
+        poc = md.get_poc(poc_id)
+    except Exception as e:
+        return json.dumps({"status": "failed", "error": {"code": "POC_NOT_FOUND", "message": str(e)[:200]}})
+    cur = poc.get("current_versions") or {}
+    if stage == "code":
+        params: dict[str, Any] = {"poc_id": poc_id, "spec_version": cur.get("spec") or (prev or {}).get("inputs", {}).get("spec_version")}
+    elif stage == "deploy":
+        params = {"poc_id": poc_id, "code_version": cur.get("code") or (prev or {}).get("inputs", {}).get("code_version"),
+                  "options": (prev or {}).get("inputs", {}).get("options") or DEFAULT_DEPLOY_OPTIONS}
+    elif stage == "test":
+        params = {"poc_id": poc_id, **({"deployment_run_id": prev["inputs"]["deployment_run_id"]}
+                                       if prev and (prev.get("inputs") or {}).get("deployment_run_id") else {})}
+    else:
+        params = {"poc_id": poc_id}
+    skill, agent_name, tool = STAGE_CALLEES[stage]
+    return json.dumps(_invoke_run(skill, agent_name, tool, poc_id, params, stage) | {"mode": "fresh"} | extra, default=str)
+
+
 # --- stage-start helpers -----------------------------------------------------
 
 # A stage-start turn must return quickly. Every specialist (draft included) registers a runs document at
@@ -283,6 +334,102 @@ RUN_APPEAR_TIMEOUT_S = 25
 RUN_APPEAR_POLL_S = 2
 INVOKE_ACK_TIMEOUT_S = 8
 INVOKE_FIRE_TIMEOUT_S = 120
+
+
+STAGE_CALLEES = {"draft": ("draft-spec", "draft_agent", "draft_spec"),
+                 "code": ("code-orchestration", "coding_orchestrator", "start_code_run"),
+                 "deploy": ("deploy-operations", "deploy_agent", "start_deploy_run"),
+                 "test": ("e2e-tests", "test_agent", "run_e2e"),
+                 "teardown": ("deploy-operations", "deploy_agent", "teardown_poc")}
+CONTINUABLE = {"code", "deploy"}  # stages whose agents implement continue_run (mode "continue")
+DEFAULT_DEPLOY_OPTIONS = {"db_mode": "shared_db", "run_tests": True, "ttl_hours": 4}
+CONTINUE_ACK_TIMEOUT_S = 25
+
+
+def _prepare_stage(poc_id: str, stage: str) -> dict[str, Any]:
+    """Look at the newest run of the stage before starting one. A live active run → {"busy": run}; a stale
+    active run is marked failed (abandoned) → {"abandoned": run_id, "run": <updated>}; else {"run": newest|None}."""
+    from poc_shared_tools import metadata as md
+    run = _newest_run(poc_id, stage)
+    if run and run.get("status") in md.ACTIVE_STATUSES:
+        if not md.run_is_stale(run):
+            return {"busy": run}
+        logger.info("run %s (%s) is stale — marking it abandoned", run["run_id"], stage)
+        return {"abandoned": run["run_id"], "run": md.abandon_run(run["run_id"])}
+    return {"run": run}
+
+
+def _resumable(run: dict[str, Any]) -> bool:
+    """A failed/abandoned code or deploy run that already made progress can be continued in place."""
+    if run.get("stage") not in CONTINUABLE or run.get("status") != "failed":
+        return False
+    if (run.get("error") or {}).get("code") in ("GATE_NOT_APPROVED", "INVALID_ENVELOPE"):
+        return False
+    o = run.get("outputs") or {}
+    if run["stage"] == "code":
+        return bool(o.get("plan") and o.get("code_version"))
+    return any(s.get("status") == "succeeded" for s in run.get("steps", []))
+
+
+def _start_stage(poc_id: str, stage: str, params: dict[str, Any], same_version: Any) -> dict[str, Any]:
+    """chat_start_code_run / chat_start_deploy_run: never block on an abandoned run. Live run → already
+    running; abandoned run of the same version that is resumable → continue it; otherwise a fresh start."""
+    guard = _prepare_stage(poc_id, stage)
+    if guard.get("busy"):
+        return {"status": "already_running", "mode": "already_running", "run_id": guard["busy"]["run_id"]}
+    extra = {"abandoned_run_id": guard["abandoned"]} if guard.get("abandoned") else {}
+    prev = guard.get("run")
+    if guard.get("abandoned") and prev and _resumable(prev) and same_version(prev):
+        return _continue_stage(poc_id, stage, prev["run_id"], "abandoned") | {"mode": "continue"} | extra
+    skill, agent_name, tool = STAGE_CALLEES[stage]
+    return _invoke_run(skill, agent_name, tool, poc_id, params, stage) | {"mode": "fresh"} | extra
+
+
+def _continue_stage(poc_id: str, stage: str, run_id: str, reason: str) -> dict[str, Any]:
+    """Fire continue_run(run_id) (mode "continue") at the stage's agent as a new root session, then wait
+    briefly for the run to be reopened (status running again). Returns {"status", "run_id"}."""
+    from poc_shared_tools import metadata as md
+    skill, agent_name, _ = STAGE_CALLEES[stage]
+    before = md.get_run(run_id)
+    session_id = f"{stage}-{run_id}-retry{int(before.get('executions') or 0) + 1}-{new_id('task')[-6:].lower()}"
+    env = Envelope.request(poc_id=poc_id, run_id=run_id, caller="chat_agent", agent=agent_name, tool="continue_run",
+                           mode="continue", params={"run_id": run_id, "reason": reason, "execution": session_id},
+                           task_id=new_id("task"))
+    r = _fire(skill, env, session_id, f"{stage}-continue")
+    if r.get("error_sync"):
+        return {"status": "failed", "run_id": run_id, "error": r["error_sync"]}
+    deadline = time.time() + CONTINUE_ACK_TIMEOUT_S
+    while time.time() < deadline:
+        doc = md.get_run(run_id)
+        if doc.get("status") in ("running", "succeeded") and int(doc.get("executions") or 0) > int(before.get("executions") or 0):
+            return {"status": doc["status"], "run_id": run_id}
+        time.sleep(RUN_APPEAR_POLL_S)
+    return {"status": "started", "run_id": run_id}
+
+
+def _fire(skill: str, env: dict[str, Any], session_id: str, label: str) -> dict[str, Any]:
+    """Fire a top-level invoke on a context-copied daemon thread (it keeps running server-side after we
+    disconnect). Returns {"box": {...}, "thread"} or {"error_sync": {...}} on workspace resolution failure."""
+    user_id = app.get_current_user_id() or "u_local"
+    try:
+        workspace_id = platform_invoke.resolve_workspace_id(skill)
+    except Exception as e:
+        logger.warning("invoke %s: workspace resolution failed: %s", label, e)
+        return {"error_sync": {"code": "WORKSPACE_UNRESOLVED", "message": str(e)[:300]}}
+    box: dict[str, Any] = {}
+
+    def _call() -> None:
+        try:
+            box["resp"] = platform_invoke.invoke_workspace(
+                workspace_id, json.dumps(env), session_id=session_id, user_id=user_id, timeout_s=INVOKE_FIRE_TIMEOUT_S)
+        except Exception as e:  # a short-timeout disconnect is expected for a long run; the run doc recovers it
+            box["error"] = str(e)
+
+    ctx = contextvars.copy_context()
+    th = threading.Thread(target=lambda: ctx.run(_call), name=f"invoke-{label}", daemon=True)
+    th.start()
+    th.join(INVOKE_ACK_TIMEOUT_S)
+    return {"box": box, "thread": th}
 
 
 def _invoke_run(skill: str, agent_name: str, tool: str, poc_id: str, params: dict[str, Any],
@@ -298,34 +445,15 @@ def _invoke_run(skill: str, agent_name: str, tool: str, poc_id: str, params: dic
     is what a minutes-long stage — including a rich transcript's draft — needs."""
     env = Envelope.request(poc_id=poc_id, run_id=new_id("run"), caller="chat_agent", agent=agent_name,
                            tool=tool, params=params, task_id=new_id("task"))
-    user_id = app.get_current_user_id() or "u_local"
     session_id = f"{stage}-{env['request']['run_id']}"  # a fresh session so the run is its own, not this turn's
 
     # Resolve the workspace id up front so a resolution/token error surfaces synchronously (before we claim
-    # the stage started). This is a fast API lookup; the long-running invoke happens off-thread below.
-    try:
-        workspace_id = platform_invoke.resolve_workspace_id(skill)
-    except Exception as e:
-        logger.warning("invoke %s: workspace resolution failed: %s", stage, e)
-        return {"status": "failed", "run_id": None,
-                "error": {"code": "WORKSPACE_UNRESOLVED", "message": str(e)[:300]}}
-
+    # the stage started). This is a fast API lookup; the long-running invoke happens off-thread.
     before = (_newest_run(poc_id, stage) or {}).get("run_id")
-    box: dict[str, Any] = {}
-
-    def _call() -> None:
-        try:
-            box["resp"] = platform_invoke.invoke_workspace(
-                workspace_id, json.dumps(env), session_id=session_id, user_id=user_id,
-                timeout_s=INVOKE_FIRE_TIMEOUT_S)
-        except Exception as e:  # a short-timeout disconnect is expected for a long run; the run doc recovers it
-            box["error"] = str(e)
-
-    # Copy the current context so any scope/auth carried on contextvars is preserved off the main thread.
-    ctx = contextvars.copy_context()
-    th = threading.Thread(target=lambda: ctx.run(_call), name=f"invoke-{stage}", daemon=True)
-    th.start()
-    th.join(INVOKE_ACK_TIMEOUT_S)
+    fired = _fire(skill, env, session_id, stage)
+    if fired.get("error_sync"):
+        return {"status": "failed", "run_id": None, "error": fired["error_sync"]}
+    box, th = fired["box"], fired["thread"]
 
     if "resp" in box:  # the specialist acked within the ack window — use its run_id if present
         run_id = _extract_invoke_run_id(box["resp"])
