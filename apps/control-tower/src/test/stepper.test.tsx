@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { StageStep } from "@/components/Stepper";
 import type { StageCell } from "@/lib/types";
 
@@ -71,5 +71,22 @@ describe("StageStep state mapping", () => {
   it("teardown not-started cell uses the live resource hint", () => {
     const { container } = renderStep({ key: "teardown", label: "Torn down", kind: "run", status: "not_started" }, "0 active");
     expect(container.textContent).toContain("0 active");
+  });
+});
+
+describe("StageStep abandoned (Round 5)", () => {
+  it("shows amber 'abandoned · Xm stale' and a Continue button wired to onRetry", () => {
+    const calls: StageCell[] = [];
+    const stage: StageCell = {
+      key: "code", label: "Code", kind: "run", status: "abandoned",
+      run_id: "run_dead", started_at: "2026-09-25T16:00:00Z", last_beat_at: "2026-09-25T16:55:00Z", retry_label: "Continue",
+    };
+    const { container, getByText } = render(
+      <StageStep stage={stage} nowMs={NOW} isLast={false} onRetry={(s) => calls.push(s)} />,
+    );
+    expect(container.querySelector('[data-status="abandoned"]')).toBeTruthy();
+    expect(container.textContent).toContain("abandoned · 5m 00s stale");
+    fireEvent.click(getByText("Continue"));
+    expect(calls.map((c) => c.run_id)).toEqual(["run_dead"]);
   });
 });

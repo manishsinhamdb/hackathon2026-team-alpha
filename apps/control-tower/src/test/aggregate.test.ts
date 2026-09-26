@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  aggregatePoc, filterCounts, matchesFilter, selectPocs, summarizeToday, toPocSummary,
+  aggregatePoc, coderKeyForTask, filterCounts, matchesFilter, selectPocs, summarizeToday, toPocSummary,
   type RawPoc, type RawResource, type RawRun, type RawTask,
 } from "@/lib/aggregate";
 import type { PocSummary } from "@/lib/types";
@@ -205,7 +205,8 @@ describe("aggregatePoc — Code run coder rows", () => {
   const tasks: RawTask[] = [
     { task_id: "t1", run_id: "run_code", seq: 1, agent: "api_agent", tool: "generate_api", mode: "contract", status: "succeeded", duration_ms: 38_000 },
     { task_id: "t2", run_id: "run_code", seq: 2, agent: "data_seeding_agent", tool: "generate_seed", mode: "seed", status: "succeeded", duration_ms: 82_000 },
-    { task_id: "t3", run_id: "run_code", seq: 3, agent: "api_agent", tool: "generate_api", mode: "backend", status: "running" },
+    // The real backend task shape: same agent/tool as the contract, mode "code" (Round 5 fix).
+    { task_id: "t3", run_id: "run_code", seq: 3, agent: "api_agent", tool: "generate_api", mode: "code", status: "running" },
   ];
 
   it("maps tasks onto contract/seed/backend/frontend/assemble in order", () => {
@@ -230,7 +231,8 @@ describe("aggregatePoc — run history display status", () => {
   const runs: RawRun[] = [
     { run_id: "run_ok", poc_id: "poc_h", stage: "draft", status: "succeeded", started_at: "2026-09-25T16:00:00Z", ended_at: "2026-09-25T16:05:00Z", outputs: { spec_version: "v003" } },
     { run_id: "run_q", poc_id: "poc_h", stage: "draft", status: "succeeded", started_at: "2026-09-25T15:50:00Z", ended_at: "2026-09-25T15:54:00Z", outputs: { needs_clarification: true } },
-    { run_id: "run_run", poc_id: "poc_h", stage: "code", status: "running", started_at: "2026-09-25T16:10:00Z" },
+    // Live: heartbeat 20 s before NOW (without it the run would be 50 min stale = abandoned).
+    { run_id: "run_run", poc_id: "poc_h", stage: "code", status: "running", started_at: "2026-09-25T16:10:00Z", heartbeat_at: "2026-09-25T16:59:40Z" },
   ];
   it("folds a draft-with-questions into a QUESTIONS row and keeps others", () => {
     const detail = aggregatePoc(poc, runs, [], [], NOW);
@@ -293,5 +295,133 @@ describe("library filters + sort", () => {
     expect(searched.map((p) => p.poc_id)).toEqual(["p_old"]);
     const archived = selectPocs(pocs, "archived", "");
     expect(archived.map((p) => p.poc_id)).toEqual(["p_arch"]);
+  });
+});
+
+/* ---- Round 5 ------------------------------------------------------------------------------------------- */
+
+describe("coder rows — legacy task docs (no component)", () => {
+  // Exactly the real legacy task documents the orchestrator wrote before `tasks.component` existed.
+  const poc: RawPoc = { poc_id: "poc_l", title: "L", status: "coding", owner_user_id: "u", approvals: [], created_at: "a", updated_at: "b" };
+  const runs: RawRun[] = [
+    { run_id: "run_l", poc_id: "poc_l", stage: "code", status: "running", started_at: "2026-09-25T16:50:00Z", heartbeat_at: "2026-09-25T16:59:50Z" },
+  ];
+  const tasks: RawTask[] = [
+    { task_id: "t1", run_id: "run_l", seq: 1, agent: "api_agent", tool: "generate_api", mode: "contract", status: "succeeded", duration_ms: 40_000 },
+    { task_id: "t2", run_id: "run_l", seq: 2, agent: "data_seeding_agent", tool: "generate_seed", mode: "code", status: "succeeded", duration_ms: 80_000 },
+    { task_id: "t3", run_id: "run_l", seq: 3, agent: "api_agent", tool: "generate_api", mode: "code", status: "succeeded", duration_ms: 120_000 },
+    { task_id: "t4", run_id: "run_l", seq: 4, agent: "frontend_agent", tool: "generate_frontend", mode: "code", status: "running" },
+  ];
+
+  it("maps each legacy task to its row (the backend row now matches)", () => {
+    expect(tasks.map(coderKeyForTask)).toEqual(["contract", "seed", "backend", "frontend"]);
+    const d = aggregatePoc(poc, runs, tasks, [], NOW);
+    const byKey = Object.fromEntries(d.coders.map((c) => [c.key, c]));
+    expect(byKey.contract.status).toBe("done");
+    expect(byKey.seed.status).toBe("done");
+    expect(byKey.backend.status).toBe("done");
+    expect(byKey.backend.duration_ms).toBe(120_000);
+    expect(byKey.frontend.status).toBe("running");
+    expect(byKey.assemble.status).toBe("queued");
+  });
+
+  it("legacy repair mode on api_agent is the backend; assemble* tools are assemble", () => {
+    expect(coderKeyForTask({ agent: "api_agent", tool: "generate_api", mode: "repair" })).toBe("backend");
+    expect(coderKeyForTask({ agent: "coding_orchestrator", tool: "assemble_bundle", mode: "code" })).toBe("assemble");
+    expect(coderKeyForTask({ agent: "something_else", tool: "x", mode: "code" })).toBeUndefined();
+  });
+});
+
+describe("coder rows — new-style task docs (component)", () => {
+  const poc: RawPoc = { poc_id: "poc_n", title: "N", status: "coding", owner_user_id: "u", approvals: [], created_at: "a", updated_at: "b" };
+  const runs: RawRun[] = [
+    { run_id: "run_n", poc_id: "poc_n", stage: "code", status: "running", started_at: "2026-09-25T16:50:00Z", heartbeat_at: "2026-09-25T16:59:50Z" },
+  ];
+  const tasks: RawTask[] = [
+    { task_id: "t1", run_id: "run_n", seq: 1, agent: "api_agent", tool: "generate_api", mode: "contract", component: "contract", status: "succeeded" },
+    { task_id: "t2", run_id: "run_n", seq: 2, agent: "data_seeding_agent", tool: "generate_seed", mode: "code", component: "seed", status: "succeeded" },
+    // backend fired twice (resume): the first attempt failed, the re-fire (higher seq) is running
+    { task_id: "t3", run_id: "run_n", seq: 3, agent: "api_agent", tool: "generate_api", mode: "code", component: "backend", status: "failed" },
+    { task_id: "t5", run_id: "run_n", seq: 5, agent: "api_agent", tool: "generate_api", mode: "code", component: "backend", status: "running" },
+    { task_id: "t4", run_id: "run_n", seq: 4, agent: "frontend_agent", tool: "generate_frontend", mode: "code", component: "frontend", status: "succeeded" },
+    { task_id: "t6", run_id: "run_n", seq: 6, agent: "coding_orchestrator", tool: "assemble_bundle", mode: "code", component: "assemble", status: "queued" },
+  ];
+
+  it("matches by component first and takes the newest task by seq", () => {
+    const d = aggregatePoc(poc, runs, tasks, [], NOW);
+    const byKey = Object.fromEntries(d.coders.map((c) => [c.key, c.status]));
+    expect(byKey).toEqual({ contract: "done", seed: "done", backend: "running", frontend: "done", assemble: "queued" });
+  });
+
+  it("component wins over a misleading legacy shape", () => {
+    expect(coderKeyForTask({ agent: "api_agent", tool: "generate_api", mode: "contract", component: "backend" })).toBe("backend");
+  });
+});
+
+describe("abandoned runs", () => {
+  const poc: RawPoc = { poc_id: "poc_a", title: "A", status: "coding", owner_user_id: "u", approvals: [], created_at: "a", updated_at: "b" };
+
+  it("a running code run with a stale heartbeat is abandoned in the stepper, history and run view", () => {
+    const runs: RawRun[] = [{
+      run_id: "run_s", poc_id: "poc_a", stage: "code", status: "running", started_at: "2026-09-25T16:40:00Z",
+      heartbeat_at: "2026-09-25T16:55:00Z", steps: [{ name: "contract", status: "succeeded" }],
+    }];
+    const d = aggregatePoc(poc, runs, [], [], NOW);
+    const code = stage(d, "code");
+    expect(code.status).toBe("abandoned");
+    expect(code.last_beat_at).toBe("2026-09-25T16:55:00Z");
+    expect(code.retry_label).toBe("Continue"); // a step already succeeded
+    expect(d.runHistory[0].display).toBe("abandoned");
+    expect(d.runs[0].abandoned).toBe(true);
+    expect(d.runs[0].has_progress).toBe(true);
+  });
+
+  it("falls back to updated_at on runs without heartbeat_at; a fresh one is still running", () => {
+    const runs: RawRun[] = [{
+      run_id: "run_u", poc_id: "poc_a", stage: "deploy", status: "running", started_at: "2026-09-25T16:00:00Z",
+      updated_at: "2026-09-25T16:58:30Z",
+    }];
+    const d = aggregatePoc(poc, runs, [], [], NOW);
+    expect(stage(d, "deploy").status).toBe("running");
+    expect(d.runs[0].abandoned).toBe(false);
+  });
+
+  it("failed with error.code ABANDONED shows as abandoned with Retry when nothing finished", () => {
+    const runs: RawRun[] = [{
+      run_id: "run_f", poc_id: "poc_a", stage: "draft", status: "failed", started_at: "2026-09-25T16:00:00Z",
+      ended_at: "2026-09-25T16:20:00Z", error: { code: "ABANDONED", message: "abandoned: heartbeat stale" },
+    }];
+    const d = aggregatePoc(poc, runs, [], [], NOW);
+    expect(stage(d, "draft").status).toBe("abandoned");
+    expect(stage(d, "draft").retry_label).toBe("Retry");
+    expect(d.runHistory[0].display).toBe("abandoned");
+  });
+
+  it("surfaces executions / hand-overs of a resumed run", () => {
+    const runs: RawRun[] = [{
+      run_id: "run_r", poc_id: "poc_a", stage: "code", status: "running", started_at: "2026-09-25T16:00:00Z",
+      heartbeat_at: "2026-09-25T16:59:45Z", executions: 2,
+      continuations: [{ at: "2026-09-25T16:30:00Z", reason: "resume_abandoned", execution: 2 }],
+    }];
+    const d = aggregatePoc(poc, runs, [], [], NOW);
+    expect(stage(d, "code").executions).toBe(2);
+    expect(d.runs[0].handovers).toBe(1);
+    expect(d.runHistory[0].executions).toBe(2);
+  });
+});
+
+describe("nickname (ui_label) search", () => {
+  const list: PocSummary[] = [
+    { poc_id: "poc_1", title: "DailyDabba Order Analytics", status: "spec_ready", versions: {}, created_at: "2026-09-25T10:00:00Z", updated_at: "x", ui_label: "Tiffin demo" },
+    { poc_id: "poc_2", title: "Kirana", status: "spec_ready", versions: {}, created_at: "2026-09-25T11:00:00Z", updated_at: "x" },
+  ];
+  it("matches the nickname as well as the title", () => {
+    expect(selectPocs(list, "active", "tiffin").map((p) => p.poc_id)).toEqual(["poc_1"]);
+    expect(selectPocs(list, "active", "dabba").map((p) => p.poc_id)).toEqual(["poc_1"]);
+  });
+  it("toPocSummary carries ui_label only when set", () => {
+    const base: RawPoc = { poc_id: "p", title: "T", status: "drafting", owner_user_id: "u", created_at: "a", updated_at: "b" };
+    expect(toPocSummary({ ...base, ui_label: "Nick" }).ui_label).toBe("Nick");
+    expect("ui_label" in toPocSummary(base)).toBe(false);
   });
 });

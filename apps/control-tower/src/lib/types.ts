@@ -22,6 +22,7 @@ export interface PocSummary {
   created_at: string;
   updated_at: string;
   ui_archived?: boolean;
+  ui_label?: string; // the UI-only nickname (Round 5); agents ignore it
 }
 
 export interface StepView {
@@ -43,6 +44,17 @@ export interface RunView {
   // schema does not store it on run documents (verified), so this is usually absent; kept optional and
   // passed through defensively so it appears automatically if the platform starts recording it.
   execution_id?: string;
+  // Round 5 — liveness. `abandoned` = queued/running with a heartbeat older than 180 s, or failed with
+  // error.code ABANDONED (the chat agent gave up on it). `last_beat_at` is the newest of heartbeat_at /
+  // updated_at / started_at. `executions` / `handovers` come from runs.executions / runs.continuations.
+  abandoned: boolean;
+  last_beat_at?: string;
+  executions?: number;
+  handovers: number;
+  has_progress: boolean; // any done task/step — Retry becomes "Continue"
+  needs_clarification?: boolean; // draft run finished with questions
+  test_passed?: boolean; // deploy run outputs.test_passed (the deploy ran the e2e tests)
+  app_url?: string; // deploy run outputs.urls.app
 }
 
 export interface TaskView {
@@ -55,7 +67,8 @@ export interface TaskView {
 }
 
 // One cell of the fixed Draft -> Spec approved -> Code -> Code approved -> Deploy -> Tests -> Torn down stepper.
-export type StageCellStatus = "not_started" | "running" | "succeeded" | "failed" | "waiting_user" | "cancelled";
+export type StageCellStatus =
+  | "not_started" | "running" | "succeeded" | "failed" | "waiting_user" | "cancelled" | "abandoned";
 export interface StageCell {
   key: string;
   label: string;
@@ -69,6 +82,9 @@ export interface StageCell {
   approvedBy?: string;
   approvedVersion?: string;
   version?: string; // spec/code version stamped on a succeeded run cell
+  last_beat_at?: string; // abandoned cells: when the run last showed signs of life
+  executions?: number; // > 1 once the run was handed over / resumed
+  retry_label?: "Retry" | "Continue"; // abandoned cells: Continue when the run has any done task/step
 }
 
 // One coder row of the "Code run" card (contract -> seed -> backend -> frontend -> assemble), derived from
@@ -84,7 +100,8 @@ export interface CoderRowView {
 }
 
 // A "Run history" table row. `display` folds a draft-with-questions into its own status for the pill.
-export type RunDisplayStatus = "succeeded" | "running" | "failed" | "questions" | "cancelled" | "queued" | "waiting_user";
+export type RunDisplayStatus =
+  | "succeeded" | "running" | "failed" | "questions" | "cancelled" | "queued" | "waiting_user" | "abandoned";
 export interface RunHistoryRow {
   stage: RunStage;
   stageLabel: string;
@@ -92,6 +109,7 @@ export interface RunHistoryRow {
   display: RunDisplayStatus;
   started_at?: string;
   duration_ms: number | null;
+  executions?: number; // shown subtly ("exec 2") once a run was resumed
 }
 
 // The library "Today" card: four counts derived from the DB.
@@ -136,6 +154,7 @@ export interface PocDetail {
   poc: {
     poc_id: string;
     title: string;
+    ui_label?: string;
     status: PocStatus;
     owner_user_id: string;
     current_versions: { spec?: string; code?: string };

@@ -39,6 +39,9 @@ env:
   # inbound identity header (Kanopy forwards client headers unstripped). Chat turns are stamped with
   # this fixed server-side user_id, never a header value.
   UI_USER_ID: u_ui
+  # Artefacts card (Round 5): the POC artefacts bucket + region. Read-only S3 access (list + presigned GET).
+  POC_S3_BUCKET: msinha-hackathon
+  AWS_REGION: ap-south-1
 
 # Secret env: mapped from the k8s Secret `control-tower-secrets` (create it in the namespace, never
 # in the repo). Convention: <release>-secrets. The chart injects each key as the named env var.
@@ -46,6 +49,11 @@ envSecrets:
   PLATFORM_SA_CLIENT_ID: control-tower-secrets
   PLATFORM_SA_CLIENT_SECRET: control-tower-secrets
   POC_PLATFORM_MONGODB_URI: control-tower-secrets
+  # Optional — read-only S3 credentials for the Artefacts card. Add the two keys to `control-tower-secrets`
+  # FIRST, then uncomment (a secretKeyRef to a missing key blocks pod start). Until then the card falls
+  # back to DB-derived keys with "open" disabled.
+  # AWS_ACCESS_KEY_ID: control-tower-secrets
+  # AWS_SECRET_ACCESS_KEY: control-tower-secrets
 
 # Liveness + readiness both hit /healthz, which returns 200 without touching the DB or platform, so a
 # transient DB/platform outage does not evict or de-rotate the pod.

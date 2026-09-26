@@ -35,3 +35,24 @@ export function getServerConfig(): ServerConfig {
   };
   return cached;
 }
+
+// Optional S3 access for the Artefacts card (Round 5). The same IAM user the agents use; when the key pair
+// is absent the artefact list falls back to DB-derived keys and "open" is disabled. Never sent to the browser.
+export interface S3Config {
+  bucket: string;
+  region: string;
+  credentials: { accessKeyId: string; secretAccessKey: string; sessionToken?: string } | null;
+}
+
+export function getS3Config(): S3Config {
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID || "";
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY || "";
+  return {
+    bucket: process.env.POC_S3_BUCKET || "msinha-hackathon",
+    region: process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "ap-south-1",
+    credentials:
+      accessKeyId && secretAccessKey
+        ? { accessKeyId, secretAccessKey, ...(process.env.AWS_SESSION_TOKEN ? { sessionToken: process.env.AWS_SESSION_TOKEN } : {}) }
+        : null,
+  };
+}

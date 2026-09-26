@@ -27,11 +27,15 @@ function createdMs(p: PocSummary): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-// Case-insensitive substring match on the title or the poc id.
+// Case-insensitive substring match on the title, the UI nickname (Round 5) or the poc id.
 export function matchesQuery(p: PocSummary, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
-  return p.title.toLowerCase().includes(q) || p.poc_id.toLowerCase().includes(q);
+  return (
+    p.title.toLowerCase().includes(q) ||
+    p.poc_id.toLowerCase().includes(q) ||
+    (p.ui_label ?? "").toLowerCase().includes(q)
+  );
 }
 
 // The rows to render in the combobox listbox: archived hidden, filtered by the query, sorted newest first,
