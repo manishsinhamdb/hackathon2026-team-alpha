@@ -605,3 +605,45 @@ hostname **`https://control-tower.sa-demo.staging.corp.mongodb.com`**, secret **
 Pod DB reads egress via Kanopy staging NAT IPs `35.174.112.8 / 35.170.235.251 / 35.174.21.138` — must be
 on the Atlas `pov` network-access list (operator step). App trusts no inbound identity header (CorpSecure
 at ingress is the login). Full detail: `docs/09_control-tower.md` § Deploy on Kanopy.
+
+## Resilient runs (2026-09-26)
+
+**Why.** Code run `run_01M3E3M5SZP4RDRFWQDZD3WM4W` (medicine finder, spec v001) was killed by the platform
+after all four coders succeeded (execution wall-clock kill at ~10 m 05 s; seen twice on the orchestrator and
+once on deploy, 2026-09-25). The run stayed `running` with no way to resume, the POC stuck at `coding`, and chat
+refused a new code run ("one run per stage").
+
+**What changed (commits d346e1a … 9b01cf8).**
+- **shared_tools.metadata:** `heartbeat_at` on every run write; `touch_run`, `heartbeat(run_id)` (daemon
+  thread, ≤ 30 s), `run_is_stale` / `find_stale_runs` (active + silent > 3 min), `abandon_run`
+  (`failed`, `error.code ABANDONED`, retryable), `reopen_run` (`continuations[]`, `executions`),
+  `task_component` + `tasks.component`. Envelope `mode` gains `"continue"`.
+- **coding-orchestrator:** `continue_run` resumes at the first step not done (re-attaches to an in-flight coder,
+  never re-fires a finished one, reuses plan/ctx/code_version and S3 artefacts; idempotent); one bounded
+  `orch_wait_task` call (≤ 240 s, heartbeating) replaces per-poll steps; self-handover at a step boundary after
+  `ORCH_HANDOVER_AFTER_S` (360) / `ORCH_HANDOVER_TOOL_CALLS` (25).
+- **deploy-agent:** same pattern — `continue_run`/`resume_run`, `resume_step_index` + `inflight` (test or repair)
+  persisted, `deploy_wait_test_run` / `deploy_wait_code_run` single bounded waits, heartbeated steps and
+  teardown, self-handover (`DEPLOY_HANDOVER_*`, early before `launch_instance`/`provision_db`).
+- **chat-agent:** start tools never block on a stale run — they abandon it and continue it in place when it is
+  resumable (same version), else start fresh; new `chat_retry_stage(poc_id, stage)`; `chat_find_run` shows
+  `stale`/`heartbeat_at`/`executions`; prompt maps "retry"/"continue the build" and the UI Retry message.
+- **coders:** stamp `tasks.component` (api-agent: `contract` vs `backend`); api/seed parse the first JSON
+  object of an LLM reply (trailing notes had failed both backend repairs with "Extra data").
+- **draft-agent:** heartbeats the draft run in every long tool.
+- `scripts/check_platform_contract.py` asserts heartbeats, continue mode and handover. Runbook rule: docs/08 §8.6.
+
+**Live proof (session `cc-resilient-0926a`, user `u_cc`).**
+
+| stage | run | outcome |
+|---|---|---|
+| code (resumed) | `run_01M3E3M5SZP4RDRFWQDZD3WM4W` | chat log 07:17:57 "is stale — marking it abandoned" → `continue_run (reason=retry)` 07:18:19 → only `frontend:done` re-recorded + assemble (20.6 s) + finalize → **succeeded 07:19:54**, POC `code_ready` v001. No coder re-fired. Executions: the killed one + the continue. |
+| deploy #1 | `run_01M3E9EC8DJ3JEJ0V93VXM90JX` | 07:21:31 → provision_db 18 s, launch_instance 178 s, fetch 11 s, seed 22 s → `build_backend` failed (tsc: aggregation pipeline union type not assignable to `PipelineStage[]`) → repair fired → **self-handover 07:28:15** (`cont1`, re-attached to the in-flight repair) → repair `LLM_OUTPUT_INVALID` → failed REPAIR_FAILED 07:33:14. |
+| deploy #1 retry | same run | "Retry the deploy" → `continue_run (reason=retry)` 07:35:47 at step 6 on the SAME instance (no new EC2) → build failed again → repair #2 `LLM_OUTPUT_INVALID` → **self-handover 07:42:06** ("after 372s / 8 tool calls", `cont3`) → failed 07:42:39. `executions: 3`. |
+| teardown | `run_01M3EARV43NEK4X4MQ0HST8V8J` | 07:44:42 → 07:44:58 succeeded, 4 resources released, POC `torn_down`, active cloud_resources **0**. |
+| deploy #2 | `run_01M3EBMT38W5QNF1BB47HNEK35` | after the JSON-parse fix: failed at `provision_db` in 1 s — Atlas API 403 `IP_ADDRESS_NOT_ON_ACCESS_LIST` for pod egress **34.196.57.85**. Nothing created. |
+
+EC2 launches used: 1. **Open:** (1) add 34.196.57.85 (or the current egress set) to the Atlas service-account API
+access list — pod egress rotates, so this recurs; (2) the backend generator's aggregation pipelines should be
+typed `PipelineStage[]` (repair now parses, but untested live); (3) an orchestrator self-handover has not been
+observed live (the resumed run was short; covered by tests with a lowered threshold).
