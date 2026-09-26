@@ -22,6 +22,8 @@ node_modules
 # Build output
 dist
 build
+# Next.js build output of apps/control-tower (~230 MB) — the archive is taken from the monorepo root
+.next
 
 # Local env files
 .env
